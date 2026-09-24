@@ -95,21 +95,34 @@ class OtaBrowser:
         return self._ws
 
     async def call(self, method: str, params: Optional[Dict] = None, timeout: float = 45.0) -> Any:
-        ws = await self._connect()
-        self._mid += 1
-        mid = self._mid
-        await ws.send_json({"id": mid, "method": method, "params": params or {}})
-        while True:
-            msg = await asyncio.wait_for(ws.receive(), timeout=timeout)
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                ev = json.loads(msg.data)
-                if ev.get("id") == mid:
-                    if "error" in ev:
-                        raise RuntimeError(str(ev["error"]))
-                    return ev.get("result", {})
-            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+        for attempt in (1, 2):
+            ws = await self._connect()
+            self._mid += 1
+            mid = self._mid
+            try:
+                await ws.send_json({"id": mid, "method": method, "params": params or {}})
+            except Exception:
                 self._ws = None
-                raise RuntimeError("CDP 连接已断开")
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(1)
+                continue
+            while True:
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    raise
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    ev = json.loads(msg.data)
+                    if ev.get("id") == mid:
+                        if "error" in ev:
+                            raise RuntimeError(str(ev["error"]))
+                        return ev.get("result", {})
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    self._ws = None
+                    if attempt == 2:
+                        raise RuntimeError("CDP 连接已断开")
+                    break  # 重连重试
 
     async def navigate(self, url: str, settle_sec: int = 18) -> None:
         await self.call("Page.navigate", {"url": url})
@@ -323,7 +336,8 @@ class OtaProber:
                 "tried": tried}
 
     def _trip_result(self, data: Dict[str, Any], url: str) -> Dict[str, Any]:
-        blk = data["blocks"][0]
+        blocks = data["blocks"]
+        blk = blocks[0]
         cur, per, total = blk["currency"], blk["per_night"], blk["total"]
         note = ""
         if cur != "CNY":
@@ -332,14 +346,22 @@ class OtaProber:
             note = f"{cur} 计价，按 {self.cfg.fx_twd_cny} 折算为近似人民币"
         else:
             per_cny, total_cny = per, total
+        fx = self.cfg.fx_twd_cny if cur != "CNY" else 1.0
+        rooms = [{"room": b.get("room", ""), "per_night": b["per_night"],
+                  "total": b["total"],
+                  "per_night_cny": round(b["per_night"] * fx),
+                  "total_cny": round(b["total"] * fx),
+                  "breakfast": b.get("breakfast", ""), "cancel": b.get("cancel", "")}
+                 for b in blocks]
         return {
             "ok": True, "source": "trip",
             "url": url, "room": blk.get("room", ""),
             "currency": cur, "per_night": per, "total": total,
             "per_night_cny": per_cny, "total_cny": total_cny,
             "breakfast": blk.get("breakfast", ""), "cancel": blk.get("cancel", ""),
-            "n_blocks": len(data["blocks"]),
-            "note": note,
+            "rooms": rooms, "n_blocks": len(blocks),
+            "note": note + ("；rooms 为解析到的房型价格块（agent 按客户房型匹配，"
+                            "无匹配时用最低价块并注明房型差异）" if len(rooms) > 1 else ""),
         }
 
     # ---- 同程 ----

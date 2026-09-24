@@ -25,6 +25,9 @@ whenToUse: 意图分类为「代订询价」时（优先级高于普通询价/�
      返回 ok=true 即拿到真价（房型/单晚/总价/含早/退改，CNY 直显）。
      注意 per_night 是**首晚价**（第二晚可能更贵）：多晚成本一律用返回的
      `total_cny`（含税总价），单晚成本 = total_cny ÷ 晚数；
+     返回的 `rooms` 是解析到的房型价格块：客户指定房型（大床/双床）时
+     **先在 rooms 里按房型匹配**（Deluxe King=大床 / Twin=双床），
+     无匹配才用最低价块并在报价里注明房型差异；
    - 同程：
      ```bash
      uv run --project gate xy-gate hotel-probe --source ly --kw "<酒店名关键词>" --city "<城市>" --checkin .. --checkout ..
