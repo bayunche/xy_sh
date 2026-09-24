@@ -315,7 +315,7 @@ export default function Settings() {
         </Button>
       </Section>
 
-      <Section title="代订酒店报价" desc="阶梯加价与限频（保存生效）；人工补价=你的会员/协议价成本，报价时优先采用">
+      <Section title="代订酒店报价" desc="阶梯加价与限频（保存生效）；人工补价=你的会员/协议价单晚成本，报价时优先采用">
         {(() => { const hq = s.hotel_quotes; return hq ? (
           <>
             <div className="flex flex-wrap gap-2">
@@ -341,7 +341,7 @@ export default function Settings() {
           <Field label="人工补价（酒店名）">
             <Input className="w-48" value={hcost.hotel} onChange={(e) => setHcost({ ...hcost, hotel: e.target.value })} placeholder="如：杭州开元名都" />
           </Field>
-          <Field label="成本价（元）">
+          <Field label="单晚成本价（元）">
             <Input className="w-28" type="number" value={hcost.price} onChange={(e) => setHcost({ ...hcost, price: e.target.value })} />
           </Field>
           <Button size="sm" variant="outline"

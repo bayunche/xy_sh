@@ -32,7 +32,7 @@ steps:
   - id: gate
     owner: daemon(闸门) + dsh-agent(执行)
     do: |
-      成本 = min(人工补价, 三源最低)；check：>¥2500 → block 转人工；
+      单晚成本 = min(人工补价, 三源最低)，总成本 = 单晚×晚数（check 按总成本）；>¥2500 → block 转人工；
       本会话本小时比价 ≥3 次 → 用缓存或缓答。allow → 按阶梯加价出报价。
     on_block: 如实转告客户"人工核价中"，摘要标 需人工
     next: quote

@@ -124,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("snipe", help="手动跑一轮盯货扫描（读订阅关键词）")
 
-    sp = sub.add_parser("hotel-cost", help="代订酒店人工补价（会员/协议价成本）；缺 price=只查询")
+    sp = sub.add_parser("hotel-cost", help="代订酒店人工补价（会员/协议价单晚成本）；缺 price=只查询")
     sp.add_argument("hotel")
     sp.add_argument("price", type=float, nargs="?")
     sub.add_parser("hotel-cache-show", help="代订酒店报价配置与缓存状态")
