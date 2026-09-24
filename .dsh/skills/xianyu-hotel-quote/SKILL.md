@@ -33,11 +33,17 @@ whenToUse: 意图分类为「代订询价」时（优先级高于普通询价/�
      uv run --project gate xy-gate hotel-probe --source ly --kw "<酒店名关键词>" --city "<城市>" --checkin .. --checkout ..
      ```
      未登录返回 `needs_login`（同程平台限制）：告知主人"后台运行 xy-gate hotel-browser 唤出浏览器登录同程一次（长期有效）"，本单同程源记「待登录」后继续；
-   - 酒店官网：web 搜索该酒店**官网预订直达页** URL（优先带日期参数的房型页），再
+   - 酒店官网（集团注册表决策，**先查表再动手**）：
      ```bash
-     uv run --project gate xy-gate hotel-probe --source official --url "<URL>" --expect "<酒店名>"
+     uv run --project gate xy-gate hotel-groups --hotel "<酒店名>"   # 识别集团 + status
      ```
-     官网价多为 best-effort（协议价需该集团会员登录，返回 login_wall 时如实标注）；
+     - `app_only`（如开元）：官网源直接记「App-only，协议价人工核」，不要去抓官网；
+     - `web_ok`（如亚朵/洲际）：按表内 urls 或 web 搜索该酒店**预订直达页**，再
+       `xy-gate hotel-probe --source official --url "<URL>" --group <集团> --expect "<酒店名>"`；
+     - `needs_login`/`anti_bot`/`unknown`（华住/万豪/希尔顿/锦江…）：probe 可能只有门市价或被拦，
+       结果如实标注；**协议价一律需该集团会员/协议账号**——提示主人在
+       `xy-gate hotel-browser` 唤出的浏览器里登录该集团会员（一次长期有效）；
+     - 官网价均为 best-effort（返回 login_wall 时如实标注，未登录价≠协议价）；
    - 取舍规则：**trip 源真价是基准**；ly/official 至少一源可用即交叉佐证，其余源跳过不重试；
      trip 也失败 → 回复「稍等，这边人工核价后马上报给您」，摘要标注 `需人工：三源查价失败`；
    - 查完后把结果记缓存（见第 5 步的缓存命令说明）。

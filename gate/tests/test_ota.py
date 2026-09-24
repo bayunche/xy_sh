@@ -72,3 +72,33 @@ def test_twd_to_cny():
 # ---- 日期格式 ----
 def test_split_date():
     assert _split_date("2026-10-01") == "20261001"
+
+
+# ---- 集团注册表 ----
+from xy_gate.ota import _HOTEL_GROUPS, match_hotel_group
+
+
+def test_group_match_domestic():
+    m = match_hotel_group("杭州开元名都大酒店")
+    assert m and m["group"] == "kaiyuan" and m["status"] == "app_only"
+    assert match_hotel_group("杭州全季酒店")["group"] == "huazhu"
+    assert match_hotel_group("维也纳国际酒店")["group"] == "jinjiang"
+    assert match_hotel_group("杭州西湖亚朵酒店")["group"] == "atour"
+
+
+def test_group_match_international():
+    assert match_hotel_group("杭州 JW万豪酒店")["group"] == "marriott"
+    assert match_hotel_group("杭州康莱德酒店")["group"] == "hilton"
+    assert match_hotel_group("杭州洲际酒店")["group"] == "ihg"
+    assert match_hotel_group("杭州索菲特西湖大酒店")["group"] == "accor"
+
+
+def test_group_match_none():
+    assert match_hotel_group("杭州某某山庄民宿") is None
+
+
+def test_group_registry_shape():
+    for key, g in _HOTEL_GROUPS.items():
+        assert g["status"] in ("web_ok", "needs_login", "partial", "anti_bot",
+                               "app_only", "unknown"), key
+        assert g["aliases"] and g["notes"]

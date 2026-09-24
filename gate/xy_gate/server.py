@@ -379,7 +379,7 @@ def build_app(daemon: Daemon) -> web.Application:
                 url = (body.get("url") or "").strip()
                 if not url.startswith("http"):
                     return _json({"ok": False, "error": "official 源需要 url"}, 400)
-                out = await prober.probe_official(url, expect)
+                out = await prober.probe_official(url, expect, body.get("group", ""))
             else:
                 return _json({"ok": False, "error": f"未知 source: {source}"}, 400)
         except Exception as e:  # noqa: BLE001
@@ -388,6 +388,15 @@ def build_app(daemon: Daemon) -> web.Application:
             {"source": source, "ok": out.get("ok"),
              "checkin": checkin, "checkout": checkout}, ensure_ascii=False))
         return _json(out)
+
+    async def hotel_groups(_req):
+        from .ota import _HOTEL_GROUPS, match_hotel_group
+        q = dict(_req.query)
+        matched = match_hotel_group(q.get("hotel", ""))
+        return _json({"groups": _HOTEL_GROUPS,
+                      "match": matched,
+                      "hint": "官网源流程：用 match 识别集团 → 按 status 决定 probe/needs_login/app_only；"
+                              "协议价均需该集团会员/协议账号在 hotel-browser 登录一次"})
 
     async def hotel_browser(req):
         try:
@@ -467,6 +476,7 @@ def build_app(daemon: Daemon) -> web.Application:
     app.router.add_post("/api/hotel/cost", hotel_cost)
     app.router.add_post("/api/hotel/probe", hotel_probe)
     app.router.add_post("/api/hotel/browser", hotel_browser)
+    app.router.add_get("/api/hotel/groups", hotel_groups)
     app.router.add_get("/api/hotel/quote-status", hotel_quote_status)
     app.router.add_post("/api/cookie-capture/start", cookie_capture_start)
     app.router.add_get("/api/cookie-capture/status", cookie_capture_status)

@@ -274,6 +274,92 @@ def _name_mismatch(expect: str, title: str) -> bool:
     return not (expect_cjk and not has_cjk_title)
 
 
+# ------------------------------------------------------- 酒店集团注册表（官网源决策表）
+# status: web_ok=可直接 probe；needs_login=站可达但价格需登录；partial=可达但
+#         流程长/慢；anti_bot=防护强可能被拦；app_only=无 web 预订；unknown=现场搜
+# （2026-09-24 实测：开元无 web 预订；华住 hworld 可达；亚朵 wechat.yaduo.com 有价；
+#   洲际可达但慢；雅高有地区选择页；万豪/希尔顿疑似反爬墙；锦江 bestwe 已下线）
+_HOTEL_GROUPS: Dict[str, Dict[str, Any]] = {
+    "huazhu": {
+        "name": "华住", "status": "needs_login",
+        "aliases": ["全季", "汉庭", "桔子水晶", "桔子", "你好酒店", "海友", "漫心",
+                    "禧玥", "花间堂", "CitiGO", "馨乐庭", "城家", "施柏阁", "Intercity"],
+        "urls": ["https://www.hworld.com/"],
+        "notes": "华住会 web 预订站（hworld.com，huazhu.com 跳转）；门市价或需登录，"
+                 "会员价需登录华住会；协议价=华住商旅协议账号（在 hotel-browser 登录一次）",
+    },
+    "jinjiang": {
+        "name": "锦江", "status": "unknown",
+        "aliases": ["锦江之星", "麗枫", "丽枫", "维也纳", "希岸", "欢朋", "7天",
+                    "锦江都城", "白玉兰", "铂涛"],
+        "urls": [],
+        "notes": "锦江荟/WeHotel 主推 App（bestwe.com 已下线）；agent 现场 web 搜索"
+                 "具体酒店预订页，或人工在锦江荟 App 查协议价",
+    },
+    "atour": {
+        "name": "亚朵", "status": "app_only",
+        "aliases": ["亚朵轻居", "亚朵S", "亚朵", "A.T House", "萨和"],
+        "urls": [],
+        "notes": "wechat.yaduo.com 为 App/微信壳（无 web 价）；亚朵直销价在「亚朵」"
+                 "小程序/App——官网源记 App-only 人工核价",
+    },
+    "kaiyuan": {
+        "name": "开元", "status": "app_only",
+        "aliases": ["开元名都", "开元度假村", "开元曼居", "开元颐居", "开元悦居",
+                    "芳草青青", "开元观堂", "开元森泊", "开元大酒店"],
+        "urls": ["https://www.kaiyuanhotels.com/"],
+        "notes": "开元无 web 预订（官网为招商加盟站）；直销价/协议价在开元 App/小程序，"
+                 "需人工查询——官网源对开元直接记「App-only，人工核价」",
+    },
+    "btg": {
+        "name": "首旅如家", "status": "unknown",
+        "aliases": ["如家商旅", "如家精选", "如家", "和颐", "璞隐", "莫泰", "建国"],
+        "urls": [],
+        "notes": "web 预订弱化（btghotels.com 证书异常）；现场搜索或 App 人工",
+    },
+    "marriott": {
+        "name": "万豪", "status": "anti_bot",
+        "aliases": ["丽思卡尔顿", "Ritz", "JW万豪", "瑞吉", "威斯汀", "喜来登",
+                    "豪华精选", "万丽", "万怡", "艾美", "臻品之选", "W酒店", "Moxy",
+                    "万豪"],
+        "urls": ["https://www.marriott.com/"],
+        "notes": "web 预订全但 Akamai 防护强，CDP 可能被拦；未登录显示门市价，"
+                 "会员/协议价（MMP 等）需登录万豪旅享家（hotel-browser 登录一次）",
+    },
+    "hilton": {
+        "name": "希尔顿", "status": "anti_bot",
+        "aliases": ["华尔道夫", "康莱德", "希尔顿欢朋", "希尔顿逸林", "希尔顿"],
+        "urls": ["https://www.hilton.com/"],
+        "notes": "防护较强；HHonors 会员价需登录（hotel-browser 登录一次）",
+    },
+    "ihg": {
+        "name": "洲际", "status": "partial",
+        "aliases": ["皇冠假日", "英迪格", "智选假日", "假日酒店", "华邑", "逸衡",
+                    "voco", "洲际"],
+        "urls": ["https://www.ihg.com/hotels/cn/zh/reservation"],
+        "notes": "web 预订可用但加载慢（20s+）；详情页 URL 含酒店代码（如 hghic-xxx），"
+                 "必须现场 web 搜索拿到正确链接再 probe（猜代码会 404）；"
+                 "部分价未登录可见，IHG 优悦会会员价/协议价需登录",
+    },
+    "accor": {
+        "name": "雅高", "status": "partial",
+        "aliases": ["索菲特", "铂尔曼", "诺富特", "美居", "宜必思", "瑞士酒店",
+                    "莱佛士", "费尔蒙", "诗铂", "瑞享", "雅高"],
+        "urls": ["https://all.accor.com/"],
+        "notes": "all.accor.com 有地区选择页（选中国后进主站）；ALL 会员价需登录",
+    },
+}
+
+
+def match_hotel_group(hotel_name: str) -> Optional[Dict[str, Any]]:
+    """按品牌别名识别酒店所属集团（返回含 group key 的条目）。"""
+    for key, g in _HOTEL_GROUPS.items():
+        for alias in g["aliases"]:
+            if alias in (hotel_name or ""):
+                return {"group": key, **g}
+    return None
+
+
 # ---------------------------------------------------------------- 查价器
 
 # 同程 hotellist city 参数映射（2026-09 从 www.ly.com/hotel 首页城市链接提取）
@@ -401,28 +487,50 @@ class OtaProber:
         return {**base, "ok": False, "reason": "搜索无结果或页面结构变化",
                 "text_head": (data.get("text_head") or "")[:200]}
 
-    # ---- 官网（通用）----
-    async def probe_official(self, url: str, expect: str = "") -> Dict[str, Any]:
+    # ---- 官网（通用 + 集团注册表）----
+    async def probe_official(self, url: str, expect: str = "",
+                             group: str = "") -> Dict[str, Any]:
         await self._throttle()
+        ginfo = _HOTEL_GROUPS.get(group) if group else None
+        base = {"source": "official", "url": url, "group": group or None}
+        if ginfo:
+            base["group_status"] = ginfo["status"]
+            if ginfo["status"] == "app_only":
+                return {**base, "ok": False, "reason": "app_only",
+                        "hint": ginfo["notes"]}
         try:
-            await self.browser.navigate(url, self.cfg.page_settle_sec)
-            data = json.loads((await self.browser.eval_js(_OFFICIAL_EXTRACT)) or "{}")
+            await self.browser.navigate(url, 8)
+            # 轮询等待：expect 关键词或任意价格出现（最多 page_settle_sec*2）
+            deadline = asyncio.get_event_loop().time() + self.cfg.page_settle_sec * 2
+            data = None
+            while True:
+                data = json.loads((await self.browser.eval_js(_OFFICIAL_EXTRACT)) or "{}")
+                hit = bool(data.get("found")) or (
+                    expect and expect[:2] in (data.get("title") or ""))
+                if hit or asyncio.get_event_loop().time() > deadline:
+                    break
+                await asyncio.sleep(3)
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "source": "official", "reason": str(e)[:160]}
+            return {**base, "ok": False, "reason": str(e)[:160]}
         prices = data.get("prices") or []
         if not prices:
-            return {"ok": False, "source": "official", "reason": "页面无可见价格",
-                    "title": data.get("title", ""),
-                    "login_wall": data.get("login_wall", False)}
+            out = {**base, "ok": False, "reason": "页面无可见价格",
+                   "title": data.get("title", ""),
+                   "login_wall": data.get("login_wall", False)}
+            if ginfo:
+                out["hint"] = ginfo["notes"]
+            return out
         cheapest = min(p["price"] for p in prices)
-        out = {"ok": True, "source": "official", "url": url,
+        note = "官网通用提取（best-effort）：价格是否可订/含早/退改需人工核对"
+        if ginfo:
+            note += f"；集团[{ginfo['name']}] {ginfo['notes']}"
+        out = {**base, "ok": True,
                "title": data.get("title", ""),
-               "cheapest": cheapest, "prices": prices[:8],
-               "note": "官网通用提取（best-effort）：价格是否可订/含早/退改需人工核对"}
+               "cheapest": cheapest, "prices": prices[:8], "note": note}
         if data.get("login_wall"):
             out["login_wall"] = True
-            out["note"] += "；页面疑似需登录/会员才显示协议价"
-        if expect and expect[:2] not in (data.get("title") or ""):
+            out["note"] += "；页面疑似需登录/会员才显示协议价（hotel-browser 登录一次长期有效）"
+        if expect and _name_mismatch(expect, data.get("title") or ""):
             out["name_mismatch"] = True
         return out
 
