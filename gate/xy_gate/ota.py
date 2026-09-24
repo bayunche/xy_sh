@@ -136,27 +136,36 @@ class OtaBrowser:
             raise RuntimeError(result.get("description", "js error"))
         return result.get("value")
 
-    async def show(self) -> None:
-        """把离屏窗口移回屏幕内并置前（用户登录 OTA 用）。"""
+    async def show(self, url: Optional[str] = None) -> None:
+        """把离屏窗口移回屏幕内并置前（用户登录 OTA 用）；可选先导航到 url。"""
         port = await self.ensure()
+        win_id = None
         async with aiohttp.ClientSession() as http:
             async with http.get(f"http://127.0.0.1:{port}/json/list",
                                 timeout=aiohttp.ClientTimeout(total=5)) as r:
                 pages = await r.json()
-        # 找 browser 级 target 拿 windowId
-        async with http.ws_connect(pages[0]["webSocketDebuggerUrl"]) as ws:
-            await ws.send_json({"id": 1, "method": "Browser.getWindowForTarget"})
-            import json as _json
-            while True:
-                msg = await asyncio.wait_for(ws.receive(), timeout=10)
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    ev = _json.loads(msg.data)
-                    if ev.get("id") == 1:
-                        win_id = ev["result"]["windowId"]
-                        break
+            page = next((p for p in pages if p.get("type") == "page"), None)
+            if not page:
+                raise RuntimeError("浏览器没有可用页签")
+            async with http.ws_connect(page["webSocketDebuggerUrl"]) as ws:
+                await ws.send_json({"id": 1, "method": "Browser.getWindowForTarget",
+                                    "params": {"targetId": page["id"]}})
+                while True:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=10)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        ev = json.loads(msg.data)
+                        if ev.get("id") == 1:
+                            if "error" in ev:
+                                raise RuntimeError(str(ev["error"].get("message", ""))[:120])
+                            win_id = ev["result"]["windowId"]
+                            break
+        if not win_id:
+            raise RuntimeError("未取到浏览器窗口 ID")
         await self.call("Browser.setWindowBounds",
                         {"windowId": win_id,
                          "bounds": {"left": 120, "top": 80, "windowState": "normal"}})
+        if url:
+            await self.call("Page.navigate", {"url": url})
         await self.call("Page.bringToFront")
 
     async def close(self) -> None:

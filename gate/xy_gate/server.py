@@ -389,10 +389,18 @@ def build_app(daemon: Daemon) -> web.Application:
              "checkin": checkin, "checkout": checkout}, ensure_ascii=False))
         return _json(out)
 
-    async def hotel_browser(_req):
+    async def hotel_browser(req):
         try:
-            await daemon.ota_prober().browser.show()
-            return _json({"ok": True, "hint": "查价浏览器已唤出；登录同程/携程后关闭窗口即可（登录态会保留）"})
+            body = {}
+            try:
+                body = await req.json()
+            except Exception:
+                pass
+            url = body.get("url") or "https://www.ly.com/hotel"
+            await daemon.ota_prober().browser.show(url)
+            return _json({"ok": True,
+                          "hint": "查价浏览器已唤出并打开同程酒店页：请在窗口里登录同程（协议价再登录对应酒店集团会员），"
+                                  "完成后直接关闭窗口即可——登录态保存在专用浏览器配置里，长期有效"})
         except Exception as e:  # noqa: BLE001
             return _json({"ok": False, "error": str(e)}, 500)
 
