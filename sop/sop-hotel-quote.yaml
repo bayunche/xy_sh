@@ -24,8 +24,10 @@ steps:
   - id: search                   # 三源查价（缓存未命中才查）
     owner: dsh-agent
     do: |
-      web 工具查 携程/同程/官网 公开可订价（价格/含早/取消政策）；
-      单源失败跳过不重试；三源全败 → 转人工话术 + 需人工事件。
+      CLI 真查价（xy-gate hotel-probe）：trip（携程/Trip.com 基准真价）+
+      ly（同程，needs_login 时记待登录并提示主人 hotel-browser 登录一次）+
+      official（官网预订直达页 best-effort）；
+      单源失败跳过不重试；trip 亦失败 → 转人工话术 + 需人工事件。
       结果记入比价缓存（同要素 30 分钟复用）。
     next: gate
 

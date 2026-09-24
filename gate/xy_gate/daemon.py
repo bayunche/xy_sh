@@ -19,6 +19,7 @@ from .brain import Brain, REPO_ROOT, summarize_result
 from .browser import CookieCapture
 from .config import Account, RobotConfig
 from .hotel_quote import HotelQuoteGate
+from .ota import OtaProber
 from .items import (FishShopRequiredError, capability_probe, my_items,
                     offline_items, rate_buyer, seller_items, update_price)
 from .mtop import MtopClient, find_key_recursive
@@ -44,6 +45,7 @@ class Daemon:
         self.risk = RiskGate(cfg, self.store)
         self.brain = Brain(cfg.brain)
         self.hotel_gate = HotelQuoteGate(cfg, self.store)
+        self._ota_prober = None
         device_id = self.store.kv_get("device_id") or None
         if not device_id:
             from .cookies import generate_device_id
@@ -196,6 +198,14 @@ class Daemon:
         self.store.kv_set("admin_chat", _json.dumps(history[-40:], ensure_ascii=False))
         self.store.add_event("admin_chat", "", "", f"管理对话：{message[:60]} → {'OK' if ok else 'FAIL'}")
         return {"ok": ok, "reply": reply}
+
+    def ota_prober(self):
+        if self._ota_prober is None:
+            from .config import REPO_ROOT
+            self._ota_prober = OtaProber(self.cfg.ota, REPO_ROOT)
+        else:
+            self._ota_prober.cfg = self.cfg.ota
+        return self._ota_prober
 
     def admin_chat_history(self) -> list:
         import json as _json

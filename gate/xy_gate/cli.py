@@ -128,6 +128,16 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("hotel")
     sp.add_argument("price", type=float, nargs="?")
     sub.add_parser("hotel-cache-show", help="代订酒店报价配置与缓存状态")
+    sp = sub.add_parser("hotel-probe", help="OTA 真查价（trip=携程镜像/Trip.com, ly=同程, official=酒店官网）")
+    sp.add_argument("--source", required=True, choices=["trip", "ly", "official"])
+    sp.add_argument("--hotel-id", help="trip 源：携程/Trip.com 酒店 ID")
+    sp.add_argument("--kw", help="ly 源：酒店关键词")
+    sp.add_argument("--city", default="", help="ly 源：城市")
+    sp.add_argument("--url", help="official 源：官网预订页 URL")
+    sp.add_argument("--checkin", required=True)
+    sp.add_argument("--checkout", required=True)
+    sp.add_argument("--expect", default="", help="酒店名（用于校验页面命中）")
+    sub.add_parser("hotel-browser", help="唤出查价浏览器窗口（登录同程/携程用）")
 
     sub.add_parser("audit", help="手动触发每日查价审计")
 
@@ -190,6 +200,14 @@ def main(argv: list[str] | None = None) -> int:
                        {"hotel": args.hotel, "price": args.price}, base)
     elif args.cmd == "hotel-cache-show":
         out = _request("GET", "/api/hotel/quote-status", base=base)
+    elif args.cmd == "hotel-probe":
+        out = _request("POST", "/api/hotel/probe", {
+            "source": args.source, "hotel_id": args.hotel_id, "kw": args.kw,
+            "city": args.city, "url": args.url, "checkin": args.checkin,
+            "checkout": args.checkout, "expect": args.expect,
+        }, base)
+    elif args.cmd == "hotel-browser":
+        out = _request("POST", "/api/hotel/browser", {"action": "open"}, base)
     elif args.cmd == "audit":
         out = _request("POST", "/audit/run", {}, base)
     else:  # pragma: no cover

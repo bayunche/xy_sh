@@ -17,11 +17,26 @@ whenToUse: 意图分类为「代订询价」时（优先级高于普通询价/�
    返回 cost 有值 → 它是「渠道优惠价」，作为最低成本候选。
    **口径：人工补价一律为「单晚成本价」**（多晚 = 单晚 × 晚数；三源查到的
    OTA 价格同样是单晚口径；`calc_quote` 试算时注意乘晚数）。
-3. **三源查价**（无缓存时才查）：
-   - 用 web 工具分别查 携程、同程、酒店官网（或官方 App 公开页）的公开可订价；
-   - 只取**能确认预订**的价格（含税含服务费），记录：价格 / 含早 / 取消政策；
-   - 单源失败或被反爬 → 跳过该源，不重试；三源全失败 → 回复
-     「稍等，这边人工核价后马上报给您」，摘要标注 `需人工：三源查价失败`；
+3. **三源查价**（无缓存时才查；用 CLI 真查价，**不要用 web 工具直接抓价格**）：
+   - 携程/Trip.com：先用 web 搜索"酒店名 携程"拿到详情页 URL 里的 `hotelId=` 数字，再
+     ```bash
+     uv run --project gate xy-gate hotel-probe --source trip --hotel-id <ID> --checkin YYYY-MM-DD --checkout YYYY-MM-DD --expect "<酒店名>"
+     ```
+     返回 ok=true 即拿到真价（房型/单晚/总价/含早/退改，CNY 直显）。
+     注意 per_night 是**首晚价**（第二晚可能更贵）：多晚成本一律用返回的
+     `total_cny`（含税总价），单晚成本 = total_cny ÷ 晚数；
+   - 同程：
+     ```bash
+     uv run --project gate xy-gate hotel-probe --source ly --kw "<酒店名关键词>" --city "<城市>" --checkin .. --checkout ..
+     ```
+     未登录返回 `needs_login`（同程平台限制）：告知主人"后台运行 xy-gate hotel-browser 唤出浏览器登录同程一次（长期有效）"，本单同程源记「待登录」后继续；
+   - 酒店官网：web 搜索该酒店**官网预订直达页** URL（优先带日期参数的房型页），再
+     ```bash
+     uv run --project gate xy-gate hotel-probe --source official --url "<URL>" --expect "<酒店名>"
+     ```
+     官网价多为 best-effort（协议价需该集团会员登录，返回 login_wall 时如实标注）；
+   - 取舍规则：**trip 源真价是基准**；ly/official 至少一源可用即交叉佐证，其余源跳过不重试；
+     trip 也失败 → 回复「稍等，这边人工核价后马上报给您」，摘要标注 `需人工：三源查价失败`；
    - 查完后把结果记缓存（见第 5 步的缓存命令说明）。
 4. **过闸门**（必须，不可跳过）：
    ```bash

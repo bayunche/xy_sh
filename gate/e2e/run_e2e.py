@@ -49,6 +49,9 @@ def expect(cond: bool, msg: str):
 
 # ── 用例 ────────────────────────────────────────────────────────────
 
+E2E_CI, E2E_CO = "2026-10-01", "2026-10-03"
+
+
 def s01_health():
     r = call("GET", "/health", timeout=10)
     expect(r.get("ok") is True, f"health={r}")
@@ -181,6 +184,21 @@ def s_hotel_quote():
     return "补价+状态接口 OK（agent 真查价见对话页验证）"
 
 
+def s17_hotel_probe():
+    """真浏览器三源查价（trip 必须出真价；ly 接受 needs_login）。"""
+    r = call("POST", "/api/hotel/probe", {
+        "source": "trip", "hotel_id": "369764",
+        "checkin": E2E_CI, "checkout": E2E_CO, "expect": "开元名都"}, timeout=180)
+    expect(r.get("ok") is True, f"trip 查价失败: {str(r)[:300]}")
+    expect(r.get("per_night_cny", 0) > 100, f"trip 价格异常: {r.get('per_night_cny')}")
+    r2 = call("POST", "/api/hotel/probe", {
+        "source": "ly", "kw": "开元名都", "city": "杭州",
+        "checkin": E2E_CI, "checkout": E2E_CO}, timeout=180)
+    ly_ok = r2.get("ok") is True or r2.get("reason") == "needs_login"
+    expect(ly_ok, f"同程通道异常: {str(r2)[:300]}")
+    return f"trip 真价 ¥{r.get('per_night_cny')}/晚（{r.get('room')}）；同程 {'可见价' if r2.get('ok') else 'needs_login（待扫码登录）'}"
+
+
 def s15_web_ui():
     with urllib.request.urlopen(BASE + "/", timeout=10) as resp:
         html = resp.read().decode("utf-8", errors="ignore")
@@ -206,6 +224,7 @@ STEPS = [
     ("14 事件台账", s14_ledgers),
     ("15 Web 后台", s15_web_ui),
     ("16 代订酒店接口", s_hotel_quote),
+    ("17 三源真查价（真浏览器）", s17_hotel_probe),
 ]
 
 

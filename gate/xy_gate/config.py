@@ -132,6 +132,9 @@ class HotelQuoteConfig:
         return 5.0
 
 
+from .ota import OtaConfig  # noqa: E402
+
+
 @dataclass
 class RobotConfig:
     mode: str = "dry-run"          # dry-run | live
@@ -146,6 +149,7 @@ class RobotConfig:
     reprice: RepriceConfig = field(default_factory=RepriceConfig)
     snipe: SnipeConfig = field(default_factory=SnipeConfig)
     hotel_quotes: HotelQuoteConfig = field(default_factory=HotelQuoteConfig)
+    ota: OtaConfig = field(default_factory=OtaConfig)
     watchlist_path: str = "config/watchlist.yaml"   # 在售清单（底价/挂价，议价闸门用）
     audit_daily_at: Optional[str] = None    # "09:00"；None/空 = 关闭每日查价审计
 
@@ -252,6 +256,8 @@ def load_robot_config(config_dir: Optional[Path] = None) -> RobotConfig:
             interval_minutes=int(snipe_raw.get("interval_minutes") or 30),
             watch=watch,
         ),
+        ota=OtaConfig(**{k: v for k, v in (raw.get("ota") or {}).items()
+                         if k in OtaConfig.__dataclass_fields__}),
         hotel_quotes=HotelQuoteConfig(
             tiers=tiers or [[500, 10.0], [1500, 8.0]],
             manual_threshold_cny=float(hq_raw.get("manual_threshold_cny") or 2500),
@@ -378,6 +384,10 @@ def render_robot_yaml(cfg: RobotConfig) -> str:
         f"  manual_threshold_cny: {cfg.hotel_quotes.manual_threshold_cny}",
         f"  cache_ttl_min: {cfg.hotel_quotes.cache_ttl_min}",
         f"  max_queries_per_hour: {cfg.hotel_quotes.max_queries_per_hour}",
+        "ota:",
+        f"  page_settle_sec: {cfg.ota.page_settle_sec}",
+        f"  fx_twd_cny: {cfg.ota.fx_twd_cny}",
+        f"  min_interval_sec: {cfg.ota.min_interval_sec}",
         "",
         f"audit_daily_at: {_y(cfg.audit_daily_at or '')}",
         "",

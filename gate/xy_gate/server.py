@@ -358,6 +358,44 @@ def build_app(daemon: Daemon) -> web.Application:
             "cache_entries": daemon.store.hotel_quote_cache_count(),
         })
 
+    async def hotel_probe(req):
+        body = await req.json()
+        source = body.get("source")
+        checkin, checkout = body.get("checkin", ""), body.get("checkout", "")
+        expect = body.get("expect", "")
+        prober = daemon.ota_prober()
+        try:
+            if source == "trip":
+                hotel_id = str(body.get("hotel_id") or "").strip()
+                if not hotel_id:
+                    return _json({"ok": False, "error": "trip 源需要 hotel_id"}, 400)
+                out = await prober.probe_trip(hotel_id, checkin, checkout, expect)
+            elif source == "ly":
+                kw = (body.get("kw") or "").strip()
+                if not kw:
+                    return _json({"ok": False, "error": "ly 源需要 kw"}, 400)
+                out = await prober.probe_ly(kw, body.get("city", ""), checkin, checkout)
+            elif source == "official":
+                url = (body.get("url") or "").strip()
+                if not url.startswith("http"):
+                    return _json({"ok": False, "error": "official 源需要 url"}, 400)
+                out = await prober.probe_official(url, expect)
+            else:
+                return _json({"ok": False, "error": f"未知 source: {source}"}, 400)
+        except Exception as e:  # noqa: BLE001
+            out = {"ok": False, "source": source, "reason": f"探测异常: {e}"}
+        daemon.store.add_event("hotel_probe", summary=json.dumps(
+            {"source": source, "ok": out.get("ok"),
+             "checkin": checkin, "checkout": checkout}, ensure_ascii=False))
+        return _json(out)
+
+    async def hotel_browser(_req):
+        try:
+            await daemon.ota_prober().browser.show()
+            return _json({"ok": True, "hint": "查价浏览器已唤出；登录同程/携程后关闭窗口即可（登录态会保留）"})
+        except Exception as e:  # noqa: BLE001
+            return _json({"ok": False, "error": str(e)}, 500)
+
     async def cookie_capture_start(_req):
         return _json(await daemon.start_cookie_capture())
 
@@ -419,6 +457,8 @@ def build_app(daemon: Daemon) -> web.Application:
     app.router.add_get("/api/chat/history", chat_history)
     app.router.add_post("/api/reload", reload_cfg)
     app.router.add_post("/api/hotel/cost", hotel_cost)
+    app.router.add_post("/api/hotel/probe", hotel_probe)
+    app.router.add_post("/api/hotel/browser", hotel_browser)
     app.router.add_get("/api/hotel/quote-status", hotel_quote_status)
     app.router.add_post("/api/cookie-capture/start", cookie_capture_start)
     app.router.add_get("/api/cookie-capture/status", cookie_capture_status)
