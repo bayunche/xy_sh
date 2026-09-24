@@ -388,6 +388,21 @@ def render_robot_yaml(cfg: RobotConfig) -> str:
         f"  page_settle_sec: {cfg.ota.page_settle_sec}",
         f"  fx_twd_cny: {cfg.ota.fx_twd_cny}",
         f"  min_interval_sec: {cfg.ota.min_interval_sec}",
+        "  corporate_codes:"]
+    if cfg.ota.corporate_codes:
+        for c in cfg.ota.corporate_codes:
+            lines.append(f'    - {{group: "{c.get("group", "")}", code: "{c.get("code", "")}", '
+                         f'label: "{c.get("label", "")}"}}')
+    else:
+        lines.append("    []")
+    lines += ["  extra_sources:"]
+    if cfg.ota.extra_sources:
+        for x in cfg.ota.extra_sources:
+            lines.append(f'    - {{name: "{x.get("name", "")}", url: "{x.get("url", "")}", '
+                         f'note: "{x.get("note", "")}"}}')
+    else:
+        lines.append("    []")
+    lines += [
         "",
         f"audit_daily_at: {_y(cfg.audit_daily_at or '')}",
         "",

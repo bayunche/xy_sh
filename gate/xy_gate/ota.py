@@ -130,7 +130,8 @@ class OtaBrowser:
 
     async def eval_js(self, expression: str) -> Any:
         res = await self.call("Runtime.evaluate",
-                              {"expression": expression, "returnByValue": True})
+                              {"expression": expression, "returnByValue": True,
+                               "awaitPromise": True})
         result = (res.get("result") or {})
         if result.get("subtype") == "error":
             raise RuntimeError(result.get("description", "js error"))
@@ -383,6 +384,12 @@ class OtaConfig:
     fx_twd_cny: float = 0.225          # TWD->CNY 近似汇率（tw 站兜底时用）
     min_interval_sec: int = 20         # 两次 CDP 查价最小间隔（对 OTA 友好）
     profile_dir: str = "data/ota-profile"
+    # 商旅协议码库：[{group: marriott, code: "XXX", label: "中油"}...]
+    # 官网源查价时按 group 自动带码（万豪/希尔顿/洲际等 Corporate/Promo Code 输入框）
+    corporate_codes: List[Dict[str, str]] = field(default_factory=list)
+    # 登录制商旅平台（第四源）：[{name: "石化商旅", url: "https://trip.sinopec.com",
+    #   note: "登录后可查中石化协议价"}...]——用户在 hotel-browser 登录后可用 official 源抓
+    extra_sources: List[Dict[str, str]] = field(default_factory=list)
 
 
 class OtaProber:
@@ -487,9 +494,68 @@ class OtaProber:
         return {**base, "ok": False, "reason": "搜索无结果或页面结构变化",
                 "text_head": (data.get("text_head") or "")[:200]}
 
-    # ---- 官网（通用 + 集团注册表）----
+    # ---- 商旅协议码 ----
+    _FIND_CODE_INPUT = r"""(async function(){
+      // 万豪/希尔顿的码框藏在 "Special Rates" 折叠钮里——先展开
+      var exp = /Special Rates|特殊价格|特殊费率|Advanced|更多筛选/i;
+      var els = document.querySelectorAll('button, a, div[role=button], span, label');
+      for (var i=0;i<els.length;i++){
+        var t = (els[i].innerText || '').trim();
+        if (t && t.length < 30 && exp.test(t)) { els[i].click(); break; }
+      }
+      await new Promise(r=>setTimeout(r, 900));
+      var key = /corp|promo|group.?code|rate.?code|set.?#|优惠码|协议码|折扣码|集团码/i;
+      var inps = document.querySelectorAll('input[type=text],input:not([type])');
+      for (var i=0;i<inps.length;i++){
+        var el = inps[i];
+        var hint = [el.placeholder, el.name, el.id,
+                    el.getAttribute('aria-label')||'',
+                    (el.labels && el.labels[0] ? el.labels[0].innerText : '')].join(' ');
+        if (key.test(hint) && !el.readOnly && !el.disabled) {
+          el.focus();
+          el.value = '';
+          return JSON.stringify({found: true, hint: hint.slice(0, 60)});
+        }
+      }
+      return JSON.stringify({found: false});
+    })()"""
+
+    _APPLY_CODE = r"""(function(){
+      var btns = document.querySelectorAll('button, a, input[type=button], input[type=submit], div[role=button]');
+      var key = /apply|apply now|提交|应用|确定|search|查找|go/i;
+      for (var i=0;i<btns.length;i++){
+        var t = (btns[i].innerText || btns[i].value || '').trim();
+        if (t && t.length < 20 && key.test(t)) { btns[i].click(); return 'clicked:' + t; }
+      }
+      var ae = document.activeElement;
+      if (ae && (ae.tagName === 'INPUT')) {
+        ae.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', keyCode: 13, bubbles: true}));
+        return 'enter';
+      }
+      return 'none';
+    })()"""
+
+    async def apply_corporate_code(self, code: str) -> Dict[str, Any]:
+        """在当前页面找协议码输入框并填入（万豪/希尔顿/洲际 Corporate/Promo Code）。"""
+        try:
+            found = json.loads((await self.browser.eval_js(self._FIND_CODE_INPUT)) or "{}")
+        except Exception as e:  # noqa: BLE001
+            return {"applied": False, "reason": str(e)[:100]}
+        if not found.get("found"):
+            return {"applied": False, "reason": "页面无协议码输入框"}
+        # native 输入（组件认真实键盘事件）
+        await self.browser.call("Input.insertText", {"text": code})
+        await asyncio.sleep(1)
+        try:
+            act = await self.browser.eval_js(self._APPLY_CODE)
+        except Exception as e:  # noqa: BLE001
+            act = f"apply error: {e}"
+        await asyncio.sleep(self.cfg.page_settle_sec)   # 等价格按新费率刷新
+        return {"applied": True, "action": str(act)[:60], "input_hint": found.get("hint")}
+
+    # ---- 官网（通用 + 集团注册表 + 商旅协议码）----
     async def probe_official(self, url: str, expect: str = "",
-                             group: str = "") -> Dict[str, Any]:
+                             group: str = "", code: str = "") -> Dict[str, Any]:
         await self._throttle()
         ginfo = _HOTEL_GROUPS.get(group) if group else None
         base = {"source": "official", "url": url, "group": group or None}
@@ -512,6 +578,15 @@ class OtaProber:
                 await asyncio.sleep(3)
         except Exception as e:  # noqa: BLE001
             return {**base, "ok": False, "reason": str(e)[:160]}
+        rate_info: Dict[str, Any] = {}
+        if code:
+            rate_info = await self.apply_corporate_code(code)
+            if rate_info.get("applied"):
+                # 按协议费率重新提取
+                try:
+                    data = json.loads((await self.browser.eval_js(_OFFICIAL_EXTRACT)) or "{}")
+                except Exception:  # noqa: BLE001
+                    pass
         prices = data.get("prices") or []
         if not prices:
             out = {**base, "ok": False, "reason": "页面无可见价格",
@@ -519,14 +594,23 @@ class OtaProber:
                    "login_wall": data.get("login_wall", False)}
             if ginfo:
                 out["hint"] = ginfo["notes"]
+            if rate_info:
+                out["rate_code"] = rate_info
             return out
         cheapest = min(p["price"] for p in prices)
         note = "官网通用提取（best-effort）：价格是否可订/含早/退改需人工核对"
+        if rate_info:
+            if rate_info.get("applied"):
+                note += f"；已按协议码刷新价格（{rate_info.get('input_hint', '')}）"
+            else:
+                note += f"；协议码未生效（{rate_info.get('reason', '')}）"
         if ginfo:
             note += f"；集团[{ginfo['name']}] {ginfo['notes']}"
         out = {**base, "ok": True,
                "title": data.get("title", ""),
                "cheapest": cheapest, "prices": prices[:8], "note": note}
+        if rate_info:
+            out["rate_code"] = rate_info
         if data.get("login_wall"):
             out["login_wall"] = True
             out["note"] += "；页面疑似需登录/会员才显示协议价（hotel-browser 登录一次长期有效）"

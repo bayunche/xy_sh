@@ -243,6 +243,24 @@ def build_app(daemon: Daemon) -> web.Application:
                 cfg.hotel_quotes.cache_ttl_min = int(hq["cache_ttl_min"])
             if hq.get("max_queries_per_hour") is not None:
                 cfg.hotel_quotes.max_queries_per_hour = int(hq["max_queries_per_hour"])
+        ota = body.get("ota")
+        if isinstance(ota, dict):
+            if "fx_twd_cny" in ota:
+                cfg.ota.fx_twd_cny = float(ota["fx_twd_cny"])
+            if "min_interval_sec" in ota:
+                cfg.ota.min_interval_sec = int(ota["min_interval_sec"])
+            if "page_settle_sec" in ota:
+                cfg.ota.page_settle_sec = int(ota["page_settle_sec"])
+            if isinstance(ota.get("corporate_codes"), list):
+                cfg.ota.corporate_codes = [
+                    {"group": str(c.get("group", "")), "code": str(c.get("code", "")),
+                     "label": str(c.get("label", ""))}
+                    for c in ota["corporate_codes"] if c.get("code")]
+            if isinstance(ota.get("extra_sources"), list):
+                cfg.ota.extra_sources = [
+                    {"name": str(x.get("name", "")), "url": str(x.get("url", "")),
+                     "note": str(x.get("note", ""))}
+                    for x in ota["extra_sources"] if x.get("url")]
         cfg.brain.job_timeout_sec = int(brain.get("job_timeout_sec") or cfg.brain.job_timeout_sec)
         cfg.brain.max_concurrent = max(1, int(brain.get("max_concurrent") or cfg.brain.max_concurrent))
         cfg.brain.per_chat_cooldown_sec = int(brain.get("per_chat_cooldown_sec") or cfg.brain.per_chat_cooldown_sec)
@@ -379,7 +397,12 @@ def build_app(daemon: Daemon) -> web.Application:
                 url = (body.get("url") or "").strip()
                 if not url.startswith("http"):
                     return _json({"ok": False, "error": "official 源需要 url"}, 400)
-                out = await prober.probe_official(url, expect, body.get("group", ""))
+                group = body.get("group", "")
+                code = body.get("code") or ""
+                if not code and group:
+                    code = next((c.get("code", "") for c in daemon.cfg.ota.corporate_codes
+                                 if c.get("group") == group), "")
+                out = await prober.probe_official(url, expect, group, code)
             else:
                 return _json({"ok": False, "error": f"未知 source: {source}"}, 400)
         except Exception as e:  # noqa: BLE001
@@ -393,10 +416,16 @@ def build_app(daemon: Daemon) -> web.Application:
         from .ota import _HOTEL_GROUPS, match_hotel_group
         q = dict(_req.query)
         matched = match_hotel_group(q.get("hotel", ""))
+        codes = [c for c in daemon.cfg.ota.corporate_codes
+                 if not matched or c.get("group") == matched.get("group")]
         return _json({"groups": _HOTEL_GROUPS,
                       "match": matched,
-                      "hint": "官网源流程：用 match 识别集团 → 按 status 决定 probe/needs_login/app_only；"
-                              "协议价均需该集团会员/协议账号在 hotel-browser 登录一次"})
+                      "corporate_codes": codes,
+                      "extra_sources": daemon.cfg.ota.extra_sources,
+                      "hint": "官网源流程：match 识别集团 → 按 status 决定 probe/needs_login/app_only；"
+                              "已配置该集团协议码时 probe 官网会自动带码（Special Rates/Corporate Code）；"
+                              "extra_sources 是登录制商旅平台（石化商旅/携程商旅等），"
+                              "在 hotel-browser 登录后用 official 源抓价"})
 
     async def hotel_browser(req):
         try:

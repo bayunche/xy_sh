@@ -357,6 +357,36 @@ export default function Settings() {
         </div>
       </Section>
 
+      <Section title="商旅协议码与商旅平台" desc="协议码=企业与酒店集团的 Corporate Code（如中油/赫兹等商旅协议）；官网查价时按集团自动填码刷新协议价">
+        <div className="space-y-2">
+          {(s.ota?.corporate_codes || []).map((c: any, i: number) => (
+            <div key={i} className="flex flex-wrap items-center gap-2">
+              <Input className="w-36" value={c.group} onChange={(e) => upd(`ota.corporate_codes.${i}.group`, e.target.value)} placeholder="集团 key（marriott/hilton/ihg/accor/huazhu）" />
+              <Input className="w-32" value={c.code} onChange={(e) => upd(`ota.corporate_codes.${i}.code`, e.target.value)} placeholder="协议码" />
+              <Input className="w-32" value={c.label} onChange={(e) => upd(`ota.corporate_codes.${i}.label`, e.target.value)} placeholder="渠道名（如中油）" />
+              <Button variant="ghost" size="icon" onClick={() => upd("ota.corporate_codes", (s.ota?.corporate_codes || []).filter((_: any, j: number) => j !== i))}><Trash2 size={14} /></Button>
+            </div>
+          ))}
+          <Button variant="secondary" size="sm" onClick={() => upd("ota.corporate_codes", [...(s.ota?.corporate_codes || []), { group: "", code: "", label: "" }])}>
+            <Plus size={14} /> 加一条协议码
+          </Button>
+        </div>
+        <div className="space-y-2">
+          <p className="text-xs text-mutedfg">登录制商旅平台（第四源）：在「查价浏览器」登录后，官网源可直接抓该平台协议价</p>
+          {(s.ota?.extra_sources || []).map((x: any, i: number) => (
+            <div key={i} className="flex flex-wrap items-center gap-2">
+              <Input className="w-36" value={x.name} onChange={(e) => upd(`ota.extra_sources.${i}.name`, e.target.value)} placeholder="平台名（如石化商旅）" />
+              <Input className="w-64" value={x.url} onChange={(e) => upd(`ota.extra_sources.${i}.url`, e.target.value)} placeholder="https://trip.sinopec.com" />
+              <Input className="w-40" value={x.note} onChange={(e) => upd(`ota.extra_sources.${i}.note`, e.target.value)} placeholder="备注" />
+              <Button variant="ghost" size="icon" onClick={() => upd("ota.extra_sources", (s.ota?.extra_sources || []).filter((_: any, j: number) => j !== i))}><Trash2 size={14} /></Button>
+            </div>
+          ))}
+          <Button variant="secondary" size="sm" onClick={() => upd("ota.extra_sources", [...(s.ota?.extra_sources || []), { name: "", url: "", note: "" }])}>
+            <Plus size={14} /> 加一个商旅平台
+          </Button>
+        </div>
+      </Section>
+
       <Section title="dsh 大脑参数" desc="job 超时 / 并发 / 会话冷却；dsh_home 为空则用系统默认">
         <div className="grid grid-cols-2 gap-3">
           <Field label="job 超时（秒）">

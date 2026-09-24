@@ -138,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--checkout", required=True)
     sp.add_argument("--expect", default="", help="酒店名（用于校验页面命中）")
     sp.add_argument("--group", default="", help="官网源：酒店集团 key（huazhu/jinjiang/atour/kaiyuan/btg/marriott/hilton/ihg/accor）")
+    sp.add_argument("--code", default="", help="商旅协议码（缺省按 --group 从配置库自动取）")
     sub.add_parser("hotel-browser", help="唤出查价浏览器窗口（登录同程/携程/集团会员用）")
     sp = sub.add_parser("hotel-groups", help="酒店集团注册表（官网源决策表）；--hotel 按名匹配集团")
     sp.add_argument("--hotel", default="")
@@ -209,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             "city": args.city, "url": args.url, "checkin": args.checkin,
             "checkout": args.checkout, "expect": args.expect,
             "group": getattr(args, "group", "") or "",
+            "code": getattr(args, "code", "") or "",
         }, base)
     elif args.cmd == "hotel-groups":
         import urllib.parse

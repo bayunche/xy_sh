@@ -167,6 +167,13 @@ class Daemon:
                 "cache_ttl_min": cfg.hotel_quotes.cache_ttl_min,
                 "max_queries_per_hour": cfg.hotel_quotes.max_queries_per_hour,
             },
+            "ota": {
+                "page_settle_sec": cfg.ota.page_settle_sec,
+                "fx_twd_cny": cfg.ota.fx_twd_cny,
+                "min_interval_sec": cfg.ota.min_interval_sec,
+                "corporate_codes": cfg.ota.corporate_codes,
+                "extra_sources": cfg.ota.extra_sources,
+            },
             "watchlist": [
                 {"item_id": k, "title": v.get("title", ""),
                  "listed_price": v.get("listed_price"), "floor_price": v.get("floor_price"),

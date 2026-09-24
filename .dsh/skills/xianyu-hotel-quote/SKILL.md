@@ -44,6 +44,11 @@ whenToUse: 意图分类为「代订询价」时（优先级高于普通询价/�
        结果如实标注；**协议价一律需该集团会员/协议账号**——提示主人在
        `xy-gate hotel-browser` 唤出的浏览器里登录该集团会员（一次长期有效）；
      - 官网价均为 best-effort（返回 login_wall 时如实标注，未登录价≠协议价）；
+   - **商旅协议码**（中油/赫兹等企业 Corporate Code）：`hotel-groups` 返回的
+     `corporate_codes` 有该集团条目时，probe official **自动带码**（官网 Special Rates/
+     Corporate Code 输入框自动填入刷新）；`extra_sources` 是登录制商旅平台
+     （石化商旅/携程商旅等，主人在 hotel-browser 登录后用 official 源抓）；
+     **合规红线**：协议码仅限授权渠道使用，给客户的话术一律不提协议码来源/公司名；
    - 取舍规则：**trip 源真价是基准**；ly/official 至少一源可用即交叉佐证，其余源跳过不重试；
      trip 也失败 → 回复「稍等，这边人工核价后马上报给您」，摘要标注 `需人工：三源查价失败`；
    - 查完后把结果记缓存（见第 5 步的缓存命令说明）。
