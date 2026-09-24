@@ -1,0 +1,62 @@
+# SOP-6 代订酒店报价（客户询价 → 三源比价 → 报价 → 成交闭环）
+# 触发: EVENT.kind == "chat" 且意图=代订询价（技能 xianyu-hotel-quote）
+id: sop-hotel-quote
+version: 1
+trigger:
+  event: chat
+  condition: 意图分类 == 代订询价
+goals:
+  - 要素齐全后 60 秒内给报价（三源比价 + 人工补价优先）
+  - 金额/频次/来源异常一律转人工，绝不硬报
+  - 真实下单与付款永远人工
+
+steps:
+  - id: parse
+    owner: dsh-agent
+    do: 解析必收要素（酒店/入住日/晚数）+可选（房型/人数/含早/免费取消）；缺必收一次性反问
+    next: cost
+
+  - id: cost                     # 人工补价（会员/协议价）优先
+    owner: dsh-agent
+    do: xy-gate hotel-cost "<酒店名>"（有值=渠道优惠价候选）
+    next: search
+
+  - id: search                   # 三源查价（缓存未命中才查）
+    owner: dsh-agent
+    do: |
+      web 工具查 携程/同程/官网 公开可订价（价格/含早/取消政策）；
+      单源失败跳过不重试；三源全败 → 转人工话术 + 需人工事件。
+      结果记入比价缓存（同要素 30 分钟复用）。
+    next: gate
+
+  - id: gate
+    owner: daemon(闸门) + dsh-agent(执行)
+    do: |
+      成本 = min(人工补价, 三源最低)；check：>¥2500 → block 转人工；
+      本会话本小时比价 ≥3 次 → 用缓存或缓答。allow → 按阶梯加价出报价。
+    on_block: 如实转告客户"人工核价中"，摘要标 需人工
+    next: quote
+
+  - id: quote
+    owner: dsh-agent
+    do: 按 prompts/hotel-quote-policy.md 模板报价（价格/含早/退改/有效期10分钟/以确认为准）
+    next: close
+
+  - id: close                    # 成交闭环
+    owner: dsh-agent + 人工
+    do: |
+      客户接受 → 引导拍「酒店代订」商品 → xy-gate reprice 改价（走改价闸门）→
+      付款卡片 → 【人工】在代理/会员渠道下单付款 → 回填确认号 →
+      xy-gate send 发确认号 → 自动确认交易（走既有七道闸门）。
+      成交时价上浮 >5% → 转人工重新核价，不吃差价。
+    next: end
+
+  - id: end
+    owner: daemon
+    do: 消息/事件台账落库
+
+guardrails:
+  - 查价自动；下单与付款永远人工
+  - 话术禁「协议价」，用「渠道优惠价」
+  - 报价必含有效期与免责条款；大额（>阈值）强制人工
+  - 比价限频（3次/会话/小时）+ 缓存 TTL 30 分钟，防 OTA 反爬
