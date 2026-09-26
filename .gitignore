@@ -20,3 +20,4 @@ dist/
 electron/node_modules/
 packaging/electron-resources/
 dist-electron/
+*.tsbuildinfo
