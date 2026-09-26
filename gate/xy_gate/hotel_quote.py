@@ -32,7 +32,7 @@ class HotelQuoteGate:
         if not row:
             return None
         ts, quotes = row
-        if time.time() - ts > self.cfg.hotel_quotes.cache_ttl_min * 60:
+        if time.time() - ts >= self.cfg.hotel_quotes.cache_ttl_min * 60:
             return None
         return quotes
 
