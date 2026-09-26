@@ -1,0 +1,64 @@
+# SOP-2 订单生命周期（买家已付款 → 确认交易）
+# 触发: daemon 路由 EVENT.kind == "order_paid"（系统卡片「买家已付款」等）
+# 实现: gate/xy_gate/daemon.py::handle_order_paid + 技能 xianyu-trade-confirm（兜底）
+id: sop-order-lifecycle
+version: 1
+trigger:
+  event: order_paid
+goals:
+  - 虚拟商品秒发内容、秒确认交易（买家体验最大化）
+  - 资金安全：确认交易必过风控闸门，超限/异常一律人工
+  - 全程台账可审计
+
+steps:
+  - id: resolve-order
+    owner: daemon
+    do: |
+      取 order_id（卡片载荷递归提取）；缺失则调 sold_orders(NOT_SHIP)
+      按 buyer_id/item_id 匹配补齐。仍缺失 → 交给大脑兜底（可查 orders）。
+    next: detail
+
+  - id: detail
+    owner: daemon
+    do: 调订单详情，尽力提取标题与实付金额（失败不阻断，金额置空走保守路径）
+    next: deliver-content
+
+  - id: deliver-content              # 自动发货内容表（可选）
+    owner: daemon
+    do: 按 item_id 或标题关键词匹配 robot.yaml delivery.items，命中即发内容
+    on_miss: 跳过（非虚拟商品或未配置）
+    next: confirm
+
+  - id: confirm                      # 风控闸门 + 确认交易（核心）
+    owner: daemon
+    do: |
+      risk.check_confirm(order, item, buyer, amount) 依次校验：
+      总开关 enabled → 商品黑/白名单 → 买家黑名单 → 金额上限
+      max_amount_cny → 重复确认冷却。
+      allow  → live: 调 consign.dummy 真确认（小刀单先免拼 freeshipping）
+      dryrun → dry-run 模式：记台账，模拟成功
+      block  → 不确认，记事件，转人工
+    next: notify
+
+  - id: notify
+    owner: daemon
+    do: 确认成功后向买家发一条确认话术（过回复闸门；dry-run 下模拟）
+    next: brain
+
+  - id: brain                        # 大脑兜底 job（技能 xianyu-trade-confirm 语境）
+    owner: dsh-agent
+    job: prompts/jobs/on-order-paid.md
+    do: |
+      核对订单状态与确认结果；自动流失败（风控/接口错）时尝试
+      confirm-check → confirm 的手动路径；仍失败 → 摘要「需人工介入」。
+    next: end
+
+  - id: end
+    owner: daemon
+    do: confirm_log + events 台账落库
+
+guardrails:
+  - 确认交易唯一入口 daemon.confirm_transaction（daemon 自动流 / HTTP / CLI 三路同闸）
+  - 金额未知时按"金额未知"保守分支处理（不阻断但摘要必须提示人工核对）
+  - 同一订单重复确认被冷却闸门拦截（幂等）
+  - 退款/售后卡片（order_refund）一律不自动处理，直接转人工事件

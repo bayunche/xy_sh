@@ -1,0 +1,9 @@
+# 账号登录态 —— 复制为 config/accounts.yaml 后填入
+# ⚠️ accounts.yaml 含 Cookie（等于账号登录态），已在 .gitignore 排除，禁止提交
+accounts:
+  default:
+    # 获取方法：
+    # 1) Chrome/Edge 登录 https://www.goofish.com
+    # 2) F12 → Network → 任一请求 → 请求头里复制整段 cookie
+    #    （必须包含 unb 与 _m_h5_tk；若失效重开网页再复制）
+    cookies: "unb=你的用户ID; _m_h5_tk=xxx_xxx; 其他字段=…"

@@ -1,0 +1,53 @@
+# SOP-4 议价自动成交（砍价 → 改价 → 引导拍下）
+# 触发: EVENT.kind == "chat" 且买家消息含还价（数字+元/刀/便宜），大脑按本 SOP 处理
+# 实现: 技能 xianyu-auto-reply（对话）+ xianyu-listing-ops（改价）+ risk.check_reprice
+id: sop-bargain-close
+version: 1
+trigger:
+  event: chat
+  condition: 意图分类 == 砍价 且消息中可解析出具体出价金额
+goals:
+  - 高于底价的还价自动成交（改价+引导拍下，全程无人工）
+  - 低于底价但接近 → 还一手；明显不诚心 → 笑拒
+  - 改价通道不可用（未开鱼小铺/dry-run）→ 口头成交 + 人工事件
+
+steps:
+  - id: parse-offer                # 大脑解析出价
+    owner: dsh-agent
+    do: 从买家消息解析出价金额；拿不到明确金额 → 走普通砍价对话（reply-policy）
+    next: floor
+
+  - id: floor                      # 查底价
+    owner: dsh-agent
+    do: xy-gate floor <item_id>（返回 listed_price 与 floor_price）
+    on_missing: 底价为空 → 只能口头谈判，禁止自动改价
+    next: decide
+
+  - id: decide
+    owner: dsh-agent
+    do: |
+      offer ≥ floor        → accept 路径
+      offer ≥ floor×0.95   → counter：回 floor 附近一口价，等买家确认
+      offer < floor×0.95   → reject 路径（reply-policy 笑拒留门）
+    next: accept
+
+  - id: accept                     # 自动成交路径
+    owner: dsh-agent
+    do: |
+      1) xy-gate reprice <item_id> <offer> --why "议价成交"
+      2) allow/dryrun 成功 → xy-gate send "改好价了，直接拍哈"
+      3) blocked → 按原因降级：
+         - 底价/降幅/频次 → 不接受该价，回到 counter 路径重新谈判
+         - 需开鱼小铺 → send "这个价可以！你拍下，我马上给你改成 X"，
+           摘要标注「需人工：拍后改价」
+    next: end
+
+  - id: end
+    owner: daemon
+    do: 改价台账（reprice 事件）+ 消息记录自动落库
+
+guardrails:
+  - reprice 只降不涨、不破底价、有频次/间隔闸门（代码强制，见 risk.check_reprice）
+  - dry-run 模式下 reprice 是模拟——回复买家的话术仍照常（dry-run 只影响平台写操作）
+  - 同一买家 10 分钟内反复压价 → 不再让价，维持 last offer
+  - 「拍下后改价」话术只有在改价通道确不可用时使用，且必须挂人工事件

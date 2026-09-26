@@ -1,0 +1,22 @@
+# 登录态与运行数据，绝不提交
+config/robot.yaml
+config/accounts.yaml
+config/watchlist.yaml
+data/
+*.sqlite3*
+gate/.venv/
+gate/.pytest_tmp/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 前端与打包产物
+web/node_modules/
+web/dist/
+dist/
+.shots/
+
+# electron
+electron/node_modules/
+packaging/electron-resources/
+dist-electron/

@@ -1,0 +1,57 @@
+# SOP-1 入站消息处理（买家私信）
+# 触发: daemon 路由 EVENT.kind == "chat"（买家消息，已过 msg_id 去重）
+# 实现: gate/xy_gate/daemon.py::handle_chat（L1/L2）+ 技能 xianyu-auto-reply（L2 大脑）
+id: sop-inbound-message
+version: 1
+trigger:
+  event: chat
+  condition: is_buyer == true
+goals:
+  - 秒回常见问题（零成本）
+  - 复杂/砍价/询价消息拟人回复（dsh 大脑）
+  - 风险话题零自动处理（转人工）
+
+steps:
+  - id: gate-reply                 # L0 硬闸门（代码，不走模型）
+    owner: daemon
+    do: 检查静默时段 quiet_hours 与每小时回复上限 max_per_hour
+    on_block:
+      do: 记录 chat_skipped 事件，结束（不回复）
+    next: keyword
+
+  - id: keyword                    # L1 关键词快答（0 成本，秒回）
+    owner: daemon
+    do: 按 robot.yaml reply.keyword_rules 匹配（含 item_id 限定）
+    on_hit:
+      do: xy-gate send 发出固定文案 → 结束
+    next: brain-cooldown
+
+  - id: brain-cooldown             # 大脑冷却（同会话 per_chat_cooldown_sec）
+    owner: daemon
+    do: 检查该会话上次大脑 job 时间
+    on_block:
+      do: 记录 chat_skipped，结束（防刷）
+    next: brain
+
+  - id: brain                      # L2 dsh 大脑（技能 xianyu-auto-reply）
+    owner: dsh-agent
+    job: prompts/jobs/on-message.md
+    do: |
+      1) 读 persona / reply-policy / intent-classify 提示词
+      2) 意图分类：询价|砍价|催发货|商品咨询|售后纠纷|闲聊
+      3) 询价/砍价 → 先查价（技能 xianyu-price-check）取中位价
+      4) 拟回复（≤80字，口语化）→ xy-gate send 发出
+    on_escalate:                   # 转人工终态（不发回复）
+      when: 售后纠纷/低于底价砍价/假货指控/连续两轮不确定
+      do: 摘要标注「需人工介入」结束
+    next: end
+
+  - id: end
+    owner: daemon
+    do: 大脑输出写 events 台账（brain_status/brain_output）
+
+guardrails:
+  - 一条来信最多一条自动回复
+  - 禁词：包赔/保真/绝对/AI/机器人/成本价
+  - 静默时段只记录不回复
+  - xy-gate send 是唯一发消息出口（dry-run 下自动模拟）

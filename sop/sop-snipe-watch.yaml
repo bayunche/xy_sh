@@ -1,0 +1,39 @@
+# SOP-5 盯货捡漏（转卖差价的买侧）
+# 触发: robot.yaml snipe.watch 非空且 enabled → daemon 定时扫；或 xy-gate snipe 手动
+# 实现: daemon._snipe_loop（纯代码，零 token）+ 事件台账
+id: sop-snipe-watch
+version: 1
+trigger:
+  event: timer.snipe
+  schedule_ref: robot.yaml -> snipe.interval_minutes
+goals:
+  - 稳定发现「低于阈值」的货源（转卖差价空间）
+  - 付款永远人工：robot 只报「发现了什么、多少钱、为什么划算」，不碰钱
+
+steps:
+  - id: scan
+    owner: daemon
+    do: |
+      对 snipe.watch 每条订阅调搜索接口（同查价技能，20 条/关键词），
+      过滤：price ≤ max_price，或 price ≤ 本页中位价 × max_ratio。
+      同一 item_id 只报一次（kv 去重）。
+    next: event
+
+  - id: event
+    owner: daemon
+    do: 写 snipe_hit 事件（标题/价格/中位价/链接），供人工在 events 里翻
+    next: human
+
+  - id: human                     # 人工拍板
+    owner: 人工
+    do: 打开链接核实（成色/描述/卖家信誉）→ 自己拍下付款
+    note: |
+      为什么不做自动拍：下单接口有 WUA 机器风控，且付款需要支付密码/验证码，
+      资金操作不可逆——robot 出错=真金白银损失。这条线永远留在人工手里。
+
+guardrails:
+  - 盯货全程只读（搜索+事件），禁止 send/confirm/reprice
+  - 命中风暴保护：每关键词每轮最多记 5 条事件，防止刷屏
+  - 阈值建议：max_ratio 0.6~0.7（低于市场 3~4 成才值得人工看）
+  - 转卖闭环 = 本 SOP（买侧发现）+ sop-order-lifecycle（卖侧自动确认发货）
+    + sop-price-audit（定价），利润 = 卖出价 −(买入价+运费+平台费)

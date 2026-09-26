@@ -1,0 +1,13 @@
+# 在售商品观察清单 —— 复制为 config/watchlist.yaml（每日查价审计用）
+# floor_price: 可选，回复策略里的让价底价（覆盖默认 挂价×0.9）
+# keyword: 查价用的搜索词（比标题更精准，带容量/版本/成色）
+items:
+  - item_id: "760000000001"
+    title: "Switch OLED 日版 白 全套"
+    listed_price: 1499
+    floor_price: 1350
+    keyword: "Switch OLED 日版"
+  - item_id: "760000000002"
+    title: "Kindle Paperwhite 5 8G"
+    listed_price: 550
+    keyword: "Kindle paperwhite 5"

@@ -1,0 +1,15 @@
+{
+  "lwp": "/!",
+  "headers": {
+    "mid": "1231700000000000 0"
+  },
+  "body": {
+    "syncPushPackage": {
+      "data": [
+        {
+          "data": "{\"1\": {\"2\": \"2880000002@goofish\", \"5\": 1700000000000, \"6\": {\"3\": {\"1\": \"e0RldGFpbHMi\", \"5\": \"{\\\"contentType\\\": 1, \\\"text\\\": {\\\"text\\\": \\\"你好，99包邮能刀吗\\\"}}\"}}, \"10\": {\"reminderContent\": \"你好，99包邮能刀吗\", \"reminderTitle\": \"买家小明\", \"reminderUrl\": \"https://www.goofish.com/item?itemId=760000000001\", \"senderNick\": \"买家小明\", \"senderUserId\": \"2880000002\", \"bizTag\": \"{\\\"itemId\\\": \\\"760000000001\\\", \\\"messageId\\\": \\\"m0001\\\"}\", \"extJson\": \"{}\"}}}"
+        }
+      ]
+    }
+  }
+}

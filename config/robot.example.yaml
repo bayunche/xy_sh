@@ -1,0 +1,67 @@
+# xy-dsh-robot 行为配置 —— 复制为 config/robot.yaml 后修改
+# 风险总开关：dry-run = 一切写操作（发消息/确认交易）只记台账不真调 API
+
+mode: dry-run          # dry-run（强烈建议先跑一周）| live
+listen: 127.0.0.1:8790 # 本地 API（只监听回环）
+account: default       # 对应 accounts.yaml 里的账号名
+db_path: data/xy_gate.sqlite3
+
+# ── dsh 大脑 ──────────────────────────────────────────────
+brain:
+  dsh_bin: dsh                 # dsh 可执行文件（PATH 里没有就写绝对路径）
+  profile: headless            # dsh profile 名（本机已初始化 ~/.dsh/profiles/headless）
+  workspace: .                 # dsh job 的工作目录（相对本仓库根）
+  job_timeout_sec: 300
+  max_concurrent: 2            # 全局并发大脑 job 数
+  per_chat_cooldown_sec: 20    # 同一会话两次大脑 job 的最小间隔（防刷）
+
+# ── 自动回复 ──────────────────────────────────────────────
+reply:
+  quiet_hours: ["23:30", "08:00"]   # 静默时段（此窗口不自动回复）；删掉则全天可回
+  max_per_hour: 60                  # 每小时自动回复上限
+  keyword_rules:                    # L1 关键词快答（秒回，0 成本）
+    - match: ["怎么发货", "什么时候发货"]
+      reply: "拍下自动发货，秒发哈，注意查收消息～"
+    - match: ["还在吗", "在吗"]
+      reply: "在的，你看上哪个直接说～"
+    # - match: ["保修"]            # 可限定商品：item_id: "7600…"
+    #   item_id: "760000000001"
+    #   reply: "个人闲置不支持店保，功能 7 天内有问题包退。"
+
+# ── 自动发货内容表（虚拟商品；命中的订单付款后先发内容）─────
+delivery:
+  items: []
+  # - item_id: "760000000001"        # 精确匹配商品 ID
+  #   content: "感谢购买！卡密：XXXX-XXXX-XXXX，有问题随时找我"
+  # - title_contains: "教程"         # 或按订单标题关键词
+  #   content: "资料已发你邮箱附件位置，注意查收"
+
+# ── 自动确认交易（资金相关，默认全关）──────────────────────
+auto_confirm:
+  enabled: false               # ⚠️ true 才会真调确认 API（还要过下面所有闸门）
+  max_amount_cny: 100          # 单笔金额上限，超过一律人工
+  item_whitelist: []           # 非空时仅白名单内商品可自动确认
+  item_blacklist: []
+  buyer_blacklist: []
+  cooldown_minutes: 3          # 同订单重复确认保护窗（幂等）
+
+# ── 自动改价（议价成交/审计调价；需账号开通鱼小铺 + live）───
+reprice:
+  enabled: false               # 总开关
+  floor_ratio: 0.85            # 无 watchlist 底价时：底价 = 挂价 × 此比例
+  max_drop_pct: 20             # 单次降幅上限 %
+  max_per_day: 5               # 每日改价次数上限
+  min_interval_min: 10         # 同商品改价最小间隔（分钟）
+
+# ── 盯货捡漏（转卖差价买侧；只发现不付款，付款永远人工）────
+snipe:
+  enabled: false
+  interval_minutes: 30
+  watch: []
+  # - keyword: "Switch OLED 日版"
+  #   max_price: 1000          # 绝对阈值：低于这个价就报
+  #   # max_ratio: 0.65        # 或相对阈值：低于市场中位价 65% 就报
+  #   note: "捡来自用或转卖"
+
+# ── 每日查价审计 ──────────────────────────────────────────
+audit_daily_at: "09:00"        # 每天 09:00 触发 daily-audit job；置空关闭

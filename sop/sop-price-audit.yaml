@@ -1,0 +1,41 @@
+# SOP-3 每日查价审计（定时经营盘点）
+# 触发: robot.yaml audit.daily_at（每日定时）或 xy-gate audit（手动）
+# 实现: daemon._audit_loop → 大脑 job（技能 xianyu-daily-audit）+ workflow 并发脚本
+id: sop-price-audit
+version: 1
+trigger:
+  event: timer.daily
+  schedule_ref: robot.yaml -> audit.daily_at
+goals:
+  - 知道自己每个在售商品相对市场的价格位置
+  - 昨日经营数据一页看完
+  - 只建议，不动钱不动商品（v1 无改价接口）
+
+steps:
+  - id: guard
+    owner: daemon
+    do: 同一天只跑一次（kv audit_last_date 幂等）
+    next: brain
+
+  - id: brain
+    owner: dsh-agent
+    job: prompts/jobs/daily-audit.md
+    do: |
+      1) 台账汇总：GET http://127.0.0.1:8790/status、/confirm/history、
+         /events?limit=200（curl，只读）
+      2) 读 config/watchlist.yaml 在售商品清单（item_id/标题/挂价/关键词）
+      3) 逐品查价：
+         - 商品 ≤3 个：串行跑技能 xianyu-price-check 的 search 命令
+         - 商品 >3 个：用 workflow 工具执行 sop/workflows/fanout-price-audit.js
+           （parallel 并发，每路 agent 查一个品并回传 JSON）
+      4) 生成经营简报（格式见技能 xianyu-daily-audit）
+    next: end
+
+  - id: end
+    owner: daemon
+    do: 大脑输出写 events 台账
+
+guardrails:
+  - 审计全程只读：禁止 send / confirm
+  - 查价触发风控（punish_url）→ 该品标注"查价被风控"，继续下一个品
+  - 简报数字必须带样本量与时间戳
