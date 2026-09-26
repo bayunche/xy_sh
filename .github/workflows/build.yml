@@ -28,9 +28,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
 
       - name: gate 单测（质量门）
+        working-directory: gate
         run: |
-          uv sync --project gate
-          uv run --project gate pytest tests/ -q
+          uv sync
+          uv run pytest tests/ -q
 
       - name: 构建前端
         run: |
