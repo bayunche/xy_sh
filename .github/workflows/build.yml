@@ -1,0 +1,60 @@
+name: build-installer
+
+on:
+  workflow_dispatch:      # 手动触发（Actions → Run workflow）
+  push:
+    tags: ["v*"]          # 打 tag 自动构建
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            builder_args: "--win nsis"
+            name: windows
+          - os: macos-latest
+            builder_args: "--mac dmg"
+            name: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: gate 单测（质量门）
+        run: |
+          uv sync --project gate
+          uv run --project gate pytest tests/ -q
+
+      - name: 构建前端
+        run: |
+          cd web
+          npm ci || npm install
+          npm run build
+
+      - name: staging 资源树
+        shell: bash
+        run: bash packaging/stage.sh
+
+      - name: electron-builder
+        run: |
+          cd electron
+          npm ci || npm install
+          npx electron-builder ${{ matrix.builder_args }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"   # mac 无签名证书，跳过公证
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: xy-robot-${{ matrix.name }}
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.dmg
+          if-no-files-found: error

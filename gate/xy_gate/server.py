@@ -412,6 +412,14 @@ def build_app(daemon: Daemon) -> web.Application:
              "checkin": checkin, "checkout": checkout}, ensure_ascii=False))
         return _json(out)
 
+    async def conversations(_req):
+        return _json({"conversations": daemon.store.conversations()})
+
+    async def conversation_read(req):
+        chat = req.match_info["chat"]
+        daemon.store.mark_conversation_read(chat)
+        return _json({"ok": True})
+
     async def hotel_groups(_req):
         from .ota import _HOTEL_GROUPS, match_hotel_group
         q = dict(_req.query)
@@ -506,6 +514,8 @@ def build_app(daemon: Daemon) -> web.Application:
     app.router.add_post("/api/hotel/probe", hotel_probe)
     app.router.add_post("/api/hotel/browser", hotel_browser)
     app.router.add_get("/api/hotel/groups", hotel_groups)
+    app.router.add_get("/api/conversations", conversations)
+    app.router.add_post("/api/conversations/{chat}/read", conversation_read)
     app.router.add_get("/api/hotel/quote-status", hotel_quote_status)
     app.router.add_post("/api/cookie-capture/start", cookie_capture_start)
     app.router.add_get("/api/cookie-capture/status", cookie_capture_status)

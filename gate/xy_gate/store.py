@@ -21,7 +21,7 @@ class Store:
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(db_path), check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()   # 可重入：conversations 聚合内嵌套调 kv_get
         self._migrate()
 
     def _migrate(self) -> None:
@@ -88,6 +88,43 @@ class Store:
                 "SELECT COUNT(*) FROM messages WHERE direction='out' AND ts > ?",
                 (time.time() - 3600,),
             ).fetchone()[0]
+
+    # ── 会话（按买家 chat_id 聚合，消息页用）──────────────────────────
+
+    def conversations(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """按买家会话聚合：昵称/最近消息/未读数（未读 = in 消息 ts > 已读水位）。"""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT chat_id, MAX(ts) AS last_ts, COUNT(*) AS cnt FROM messages"
+                " WHERE chat_id != '' GROUP BY chat_id ORDER BY last_ts DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            out = []
+            for chat_id, last_ts, cnt in rows:
+                last = self._db.execute(
+                    "SELECT direction, sender_name, text FROM messages"
+                    " WHERE chat_id=? ORDER BY id DESC LIMIT 1", (chat_id,)).fetchone()
+                buyer = self._db.execute(
+                    "SELECT sender_id, sender_name FROM messages"
+                    " WHERE chat_id=? AND direction='in' ORDER BY id DESC LIMIT 1",
+                    (chat_id,)).fetchone()
+                read_upto = float(self.kv_get(f"msg_read:{chat_id}") or 0)
+                unread = self._db.execute(
+                    "SELECT COUNT(*) FROM messages"
+                    " WHERE chat_id=? AND direction='in' AND ts > ?",
+                    (chat_id, read_upto)).fetchone()[0]
+                out.append({
+                    "chat_id": chat_id,
+                    "buyer_id": buyer[0] if buyer else "",
+                    "buyer_name": buyer[1] if buyer else chat_id,
+                    "last_msg": (last[2] or "")[:80] if last else "",
+                    "last_direction": last[0] if last else "",
+                    "last_ts": last_ts, "count": cnt, "unread": unread,
+                })
+        return out
+
+    def mark_conversation_read(self, chat_id: str) -> None:
+        self.kv_set(f"msg_read:{chat_id}", str(time.time()))
 
     # ── 事件 ──────────────────────────────────────────────────────────
 

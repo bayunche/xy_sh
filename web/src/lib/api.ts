@@ -43,5 +43,9 @@ export const getChatHistory = () => api("/api/chat/history");
 export const captureStart = () => api("/api/cookie-capture/start", { method: "POST", body: "{}" });
 export const captureStatus = () => api("/api/cookie-capture/status");
 export const captureStop = () => api("/api/cookie-capture/stop", { method: "POST", body: "{}" });
+export const getConversations = () => api("/api/conversations");
+export const markConversationRead = (chat: string) =>
+  api(`/api/conversations/${encodeURIComponent(chat)}/read`, { method: "POST" });
+
 export const postHotelCost = (hotel: string, price?: number) =>
   api("/api/hotel/cost", { method: "POST", body: JSON.stringify({ hotel, price }) });
