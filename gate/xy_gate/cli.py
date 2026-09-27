@@ -129,7 +129,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("price", type=float, nargs="?")
     sub.add_parser("hotel-cache-show", help="代订酒店报价配置与缓存状态")
     sp = sub.add_parser("hotel-probe", help="OTA 真查价（trip=携程镜像/Trip.com, ly=同程, official=酒店官网）")
-    sp.add_argument("--source", required=True, choices=["trip", "ly", "official"])
+    sp.add_argument("--source", required=True, choices=["trip", "ly", "official", "app"])
+    sp.add_argument("--app", default="hertz", help="app 源：hertz=赫兹商旅（南网）")
     sp.add_argument("--hotel-id", help="trip 源：携程/Trip.com 酒店 ID")
     sp.add_argument("--kw", help="ly 源：酒店关键词")
     sp.add_argument("--city", default="", help="ly 源：城市")
@@ -140,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--group", default="", help="官网源：酒店集团 key（huazhu/jinjiang/atour/kaiyuan/btg/marriott/hilton/ihg/accor）")
     sp.add_argument("--code", default="", help="商旅协议码（缺省按 --group 从配置库自动取）")
     sub.add_parser("hotel-browser", help="唤出查价浏览器窗口（登录同程/携程/集团会员用）")
+    sub.add_parser("hotel-app-state", help="App 查价通道状态（模拟器 ADB/App 安装诊断）")
     sp = sub.add_parser("hotel-groups", help="酒店集团注册表（官网源决策表）；--hotel 按名匹配集团")
     sp.add_argument("--hotel", default="")
 
@@ -211,7 +213,10 @@ def main(argv: list[str] | None = None) -> int:
             "checkout": args.checkout, "expect": args.expect,
             "group": getattr(args, "group", "") or "",
             "code": getattr(args, "code", "") or "",
+            "app": getattr(args, "app", "") or "",
         }, base)
+    elif args.cmd == "hotel-app-state":
+        out = _request("GET", "/api/hotel/app-state", base=base)
     elif args.cmd == "hotel-groups":
         import urllib.parse
         qs = urllib.parse.urlencode({"hotel": args.hotel}) if getattr(args, "hotel", "") else ""
