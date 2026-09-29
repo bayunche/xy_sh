@@ -119,12 +119,36 @@ class RpaClient:
                     target = (rc.left, rc.top, rc.right, rc.bottom)
             return True
 
-        user32.EnumWindows(cb, 0)
-        if not target:
+        # EnumWindows 回调拿不到 hwnd 本体，重找一次拿句柄并置顶（防遮挡）
+        hwnd_mu = None
+        pairs = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+        def cb2(hwnd, _lp):
+            if user32.IsWindowVisible(hwnd):
+                n = user32.GetWindowTextLengthW(hwnd)
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                if buf.value == "MuMu模拟器":
+                    rc = wt.RECT()
+                    user32.GetWindowRect(hwnd, ctypes.byref(rc))
+                    if rc.right - rc.left > 300:
+                        pairs.append((hwnd, (rc.left, rc.top, rc.right, rc.bottom)))
+            return True
+
+        user32.EnumWindows(cb2, 0)
+        if not pairs:
             return None
+        hwnd_mu, target = pairs[0]
+        # 最小化则还原，然后置顶到前台（屏幕级抓取必须窗口可见）
+        user32.ShowWindow(hwnd_mu, 9)   # SW_RESTORE
+        user32.SetForegroundWindow(hwnd_mu)
+        user32.SetWindowPos(hwnd_mu, -1, 0, 0, 0, 0, 0x0003)   # HWND_TOPMOST, NOMOVE|NOSIZE
+        time.sleep(0.6)
         self.shots_dir.mkdir(parents=True, exist_ok=True)
         path = self.shots_dir / name
         ImageGrab.grab(bbox=target, all_screens=True).save(path)
+        user32.SetWindowPos(hwnd_mu, -2, 0, 0, 0, 0, 0x0003)   # 取消 TOPMOST
         return path
 
 
@@ -156,28 +180,209 @@ class HertzApp(RpaClient):
                             "（南网 SSO），登录态会保留在模拟器里"}
         return None
 
+    # ---- 已校准的完整查价流程（2026-09-30 实测走通）----
+    def _tap_text_container(self, text: str, settle: float = 2.0) -> bool:
+        """点文本的可点击祖先容器（Weex 文本本身常 clickable=false）。"""
+        root = self.dump()
+        nodes = list(root.iter("node"))
+
+        def paths(node, anc):
+            for c in node:
+                t = (c.attrib.get("text") or "").strip()
+                ch = anc + [c]
+                if t == text:
+                    yield ch
+                yield from paths(c, ch)
+
+        for chain in paths(root, []):
+            for a in reversed(chain[:-1]):
+                if a.attrib.get("clickable") == "true":
+                    b = a.attrib.get("bounds") or ""
+                    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", b)
+                    if m and m.group(1) != "0":
+                        x = (int(m.group(1)) + int(m.group(3))) // 2
+                        y = (int(m.group(2)) + int(m.group(4))) // 2
+                        if 0 < y < 1850:
+                            self.tap(x, y)
+                            time.sleep(settle)
+                            return True
+            break
+        return False
+
+    def _at_page(self, frag: str) -> bool:
+        return any(frag in (t or "") for t in self.texts() if (t or "").startswith("pages/"))
+
+    def _goto_hotel_search(self) -> bool:
+        """确保停在 book-hotel 搜索页（从首页进入；处理'仅查询'弹层）。"""
+        for _ in range(4):
+            if self._at_page("book-hotel/book-hotel"):
+                self.tap_text("仅查询", settle=1.5)   # 关掉申请单弹层（无则忽略）
+                return True
+            self.dev.shell("input swipe 540 700 540 1500 300")   # 复位滚动到顶部（下拉）
+            time.sleep(1)
+            self._tap_text_container("酒店预订", settle=4)
+            time.sleep(2)
+        return self._at_page("book-hotel/book-hotel")
+
+    def _select_city(self, city: str) -> bool:
+        for attempt in range(2):
+            # 城市字段：直点文本或点容器双保险
+            if not self.tap_text("请选择城市", settle=5):
+                self._tap_text_container("请选择城市", settle=6)
+            # 轮询等城市页渲染（H5 慢，实测 5-8s）
+            ts = []
+            for _ in range(8):
+                time.sleep(1.2)
+                ts = self.texts()
+                if any(t == "热门城市" for t in ts):
+                    break
+            if any(t == city for t in ts) and any(t == "热门城市" for t in ts):
+                if self.tap_text(city, settle=3):
+                    time.sleep(1)
+                    if not any(t == "热门城市" for t in self.texts()):
+                        return True   # 城市页已关=选择成功
+            elif any((t or "").strip() == city for t in ts):
+                return True           # 字段已是目标城市
+            self.back(); time.sleep(1.5)
+        return False
+
+    def _select_dates(self, checkin: str, checkout: str) -> bool:
+        """checkin/checkout: YYYY-MM-DD。日历多月滚动式，格子=节日+日+标记。"""
+        import datetime as dt
+        ci = dt.date.fromisoformat(checkin)
+        co = dt.date.fromisoformat(checkout)
+        # 点日期字段开日历：优先当前显示的入住日（MM月DD日），否则"今天"
+        opened = False
+        for n in self.dump().iter("node"):
+            t = (n.attrib.get("text") or "").strip()
+            if re.match(r"^\d{2}月\d{2}日$", t):
+                pos = _center(n.attrib.get("bounds") or "")
+                if pos != (0, 0):
+                    self.tap(*pos); time.sleep(3); opened = True
+                    break
+        if not opened and not self.tap_text("今天", settle=3):
+            return False
+        ym = f"{ci.year}年{ci.month}月"
+        root = self.dump()
+        for _ in range(5):
+            y = self._text_y(root, ym)
+            if y is not None and 100 < y < 1500:
+                break
+            self.dev.shell("input swipe 540 1500 540 700 400")
+            time.sleep(1.2)
+            root = self.dump()
+        else:
+            return False
+        y_end = self._text_y(root, f"{co.year}年{co.month}月") or 99999
+        if not self._tap_day_in(root, ci.day, y, y_end):
+            return False
+        time.sleep(1)
+        root2 = self.dump()
+        y2 = self._text_y(root2, ym) or y
+        y2_end = self._text_y(root2, f"{co.year}年{co.month}月") or 99999
+        return self._tap_day_in(root2, co.day, y2, y2_end)
+
+    def _text_y(self, root, txt: str):
+        for n in root.iter("node"):
+            if (n.attrib.get("text") or "").strip() == txt:
+                m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
+                if m:
+                    return (int(m.group(2)) + int(m.group(4))) // 2
+        return None
+
+    def _tap_day_in(self, root, day: int, y_top: int, y_bottom: int) -> bool:
+        pat = re.compile(r"^(?:[\u4e00-\u9fa5]{0,4})?" + str(day) + r"(?:入住|离店|在店)?$")
+        for n in root.iter("node"):
+            t = (n.attrib.get("text") or "").strip()
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
+            if t and m and pat.match(t) and n.attrib.get("clickable") == "true":
+                cy = (int(m.group(2)) + int(m.group(4))) // 2
+                if y_top < cy < y_bottom and 0 < cy < 1850:
+                    x = (int(m.group(1)) + int(m.group(3))) // 2
+                    self.tap(x, cy)
+                    return True
+        return False
+
+    def _read_hotel_list(self) -> List[Dict[str, Any]]:
+        """读列表页价格行（滚动合并）；名称与价格按序配对。"""
+        out: Dict[str, Dict[str, Any]] = {}
+        all_texts: List[str] = []
+        for _ in range(3):
+            ts = self.texts()
+            all_texts.extend(ts)
+            for t in ts:
+                t = (t or "").strip()
+                pm = re.search(r"[¥￥]\s*([0-9][0-9,]*\.?[0-9]*)\s*起", t)
+                if pm and t not in out:
+                    out[t] = {"price_text": t,
+                              "price": round(float(pm.group(1).replace(",", "")))}
+            self.dev.shell("input swipe 540 1500 540 700 300")
+            time.sleep(1.5)
+        items = list(out.values())
+        names = [t for t in all_texts
+                 if t and ("酒店" in t or "公寓" in t) and 4 < len(t) < 30
+                 and "关键字" not in t and "协议" not in t]
+        for i, name in enumerate(dict.fromkeys(names)):
+            if i < len(items):
+                items[i]["name"] = name
+        return items
+
     def probe(self, hotel: str = "", checkin: str = "", checkout: str = "",
-              nights: int = 1) -> Dict[str, Any]:
-        """查价 MVP：启动→校验登录→进入酒店列表读价（流程待登录后校准）。"""
+              nights: int = 1, city: str = "杭州") -> Dict[str, Any]:
+        """完整查价流程：登录检测→搜索页→城市→日期→查询→协议价列表。"""
         base = {"source": "app", "package": HERTZ_PACKAGE}
         try:
             self.launch()
         except Exception as e:  # noqa: BLE001
             return {**base, "ok": False, "reason": f"模拟器不可用: {str(e)[:120]}"}
         time.sleep(3)
-        texts = self.texts()
-        need = self._require_login(texts)
+        need = self._require_login(self.texts())
         if need:
             return need
-        # 已登录：抽取当前屏价格（后续校准"酒店搜索→日期→列表"流程后启用）
-        prices = sorted({int(m.replace(",", ""))
-                         for t in texts for m in PRICE_RE.findall(t or "")})
-        shot = self.screen("hertz_probe.png")
-        out = {**base, "ok": bool(prices), "prices": prices[:12],
-               "texts_sample": texts[:30], "screenshot": str(shot) if shot else None,
-               "note": "MVP：当前屏价格抽取；搜索/日期流程待登录后校准"}
-        if not prices:
-            out["reason"] = "当前页无可见价格（需校准搜索流程）"
+        # 状态归位：连 back 回首页根（消除上轮残留浮层/子页）
+        for _ in range(5):
+            if self._at_page("index-travel") and not any(
+                    t in ("历史记录", "选择日期") for t in self.texts()):
+                break
+            self.back(); time.sleep(1.2)
+        if not self._goto_hotel_search():
+            return {**base, "ok": False, "reason": "未能进入酒店搜索页（App 改版或卡顿）"}
+        # 清理遮挡浮层（历史记录/日历）
+        for _ in range(2):
+            ts = self.texts()
+            if any(t in ("历史记录", "选择日期") for t in ts):
+                self.back(); time.sleep(1.5)
+            else:
+                break
+        # 城市已是目标则跳过（字段显示城市名而非"请选择城市"）
+        already = any((t or "").strip() == city for t in self.texts())
+        if not already and not self._select_city(city):
+            return {**base, "ok": False, "reason": f"城市选择失败: {city}（支持热门城市直点，其他待字母索引校准）"}
+        if checkin and checkout:
+            import re as _re9
+            cur = [t.strip() for t in self.texts() if t and _re9.match(r"^[0-9]{1,2}月[0-9]{2}日$", t.strip())]
+            want_ci = "%02d月%02d日" % (int(checkin[5:7]), int(checkin[8:10]))
+            want_co = "%02d月%02d日" % (int(checkout[5:7]), int(checkout[8:10]))
+            if want_ci in cur and want_co in cur:
+                pass   # 日期已是目标
+            elif not self._select_dates(checkin, checkout):
+                return {**base, "ok": False, "reason": f"日期选择失败: {checkin}~{checkout}"}
+        if not self.tap_text("查询", settle=8):
+            return {**base, "ok": False, "reason": "查询按钮未找到"}
+        time.sleep(3)
+        items = self._read_hotel_list()
+        matched = [i for i in items if hotel[:2] in (i.get("name") or "")] if hotel else []
+        target = matched[0] if matched else None
+        shot = self.screen("hertz_list.png")
+        out = {**base, "ok": bool(items),
+               "city": city, "checkin": checkin, "checkout": checkout,
+               "items": items[:15],
+               "target": target,
+               "lowest": min((i["price"] for i in items), default=None),
+               "screenshot": str(shot) if shot else None,
+               "note": "南网协议价列表（'符合差标'为差旅标准过滤标签）；target 未命中看 items 全列表"}
+        if not items:
+            out["reason"] = "列表无价格（无房/加载慢/App 改版）"
         return out
 
 
