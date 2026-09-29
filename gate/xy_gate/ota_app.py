@@ -1,133 +1,199 @@
-"""App 查价通道（第四源）：Android 模拟器（MuMu 12）+ uiautomator2 操作商旅 App。
+"""App 查价通道（第四源）：MuMu 模拟器 + 纯 ADB RPA（MAA 式，零注入）。
 
-设计（与 CDP 浏览器通道同构）：
-- 模拟器常驻（用户手动启动），gate 通过 adbutils 连 127.0.0.1:16384（MuMu 实例 0）
-- uiautomator2 驱动：打开 App → 搜索酒店 → 选日期 → 读价格列表 → 回 JSON
-- 控件选择器集中在 _SELECTORS，App 改版只需调这里
-- 登录态：用户在模拟器里登录一次（南网 SSO），长期保留在模拟器镜像里
+实测结论（2026-09-30）：
+- 该 App 加固壳会检测 uiautomator2 的 atx-agent 常驻注入并自杀——**不能用 u2 连接**；
+- 渲染正常（Weex），但 adb screencap 抓不到 GPU 合成层（白屏）——截图走 Windows 层
+  （GetWindowRect + ImageGrab，MuMu 窗口需可见不可最小化）；
+- 布局侦察用 `uiautomator dump`（系统工具，一次性退出，非常驻）实测可用；
+- 点击 `input tap`、输入 `input text`（ASCII；中文输入后续按搜索页实际形态解决）。
 
-依赖：uiautomator2/adbutils（已在 gate 依赖中）。未连接模拟器时返回友好错误。
+流程：dump 布局 → 按文本找坐标 → input tap → （必要时）Windows 层截图/OCR 复核。
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import re
-from typing import Any, Dict, List, Optional
+import time
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-# 赫兹商旅（南方电网，远光软件）
 HERTZ_PACKAGE = "com.ygsoft.mup.businesstravelnw"
-
-# MuMu 12 实例 0 的默认 ADB 端口；多实例为 16384+2*n
+HERTZ_MAIN = f"{HERTZ_PACKAGE}/com.ygsoft.tphone.MainActivity"
 MUMU_ADB = "127.0.0.1:16384"
-
-# ---- 控件选择器（真机 dump 后校准；App 双周迭代，改版优先改这里）----
-_SELECTORS = {
-    # 首页酒店入口（文本或 desc）
-    "home_hotel_btn": "酒店",
-    # 搜索页目的地输入框
-    "search_input": 'com.ygsoft.mup.businesstravelnw:id/et_search',
-    # 搜索确认
-    "search_confirm": "搜索",
-    # 价格列表容器里的价格文本（正则）
-    "price_pattern": r"[¥￥]\s?([0-9][0-9,]{2,})",
-}
+PRICE_RE = re.compile(r"[¥￥]\s*([0-9][0-9,]{2,})")
+LOGIN_HINTS = ("请输入手机号", "请输入密码", "请输入验证码", "账号密码登录", "登录")
 
 
-class AppProber:
-    """模拟器 App 查价。所有方法返回与 web 源同构的 dict（ok/source/reason/...）。"""
+def _center(bounds: str) -> Tuple[int, int]:
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds or "")
+    if not m:
+        return (0, 0)
+    x1, y1, x2, y2 = map(int, m.groups())
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
 
-    def __init__(self, adb_addr: str = MUMU_ADB, package: str = HERTZ_PACKAGE):
+
+class RpaClient:
+    """纯 ADB RPA 基元：dump / tap / text / screen / launch。"""
+
+    def __init__(self, adb_addr: str = MUMU_ADB, shots_dir: str = "../data/emulator"):
         self.adb_addr = adb_addr
-        self.package = package
-        self._d = None   # uiautomator2.Device，连接后缓存
+        self._dev = None
+        self.shots_dir = Path(shots_dir)
 
-    # ---- 连接 ----
-    def connect(self, timeout: int = 10) -> Any:
-        """连模拟器并返回 u2 device；失败抛异常（含自助指引）。"""
-        if self._d is not None:
-            return self._d
-        import adbutils
-        import uiautomator2 as u2
+    @property
+    def dev(self):
+        if self._dev is None:
+            import adbutils
+            adbutils.adb.connect(self.adb_addr, timeout=8)
+            self._dev = adbutils.adb.device(self.adb_addr)
+        return self._dev
 
-        adb = adbutils.adb
-        try:
-            adb.connect(self.adb_addr, timeout=timeout)
-        except Exception as e:  # noqa: BLE001
-            raise RuntimeError(f"连不上模拟器 ADB（{self.adb_addr}）：{e}。"
-                               "请先启动 MuMu 模拟器") from e
-        d = u2.connect(self.adb_addr)
-        if not d.info.get("screenOn"):
-            d.screen_on()
-        self._d = d
-        return d
+    # ---- 布局（一次性 dump，非常驻）----
+    def dump(self) -> ET.Element:
+        self.dev.shell("uiautomator dump /sdcard/rpa_ui.xml")
+        xml = self.dev.shell("cat /sdcard/rpa_ui.xml")
+        xml = xml[xml.find("<?xml"):] if "<?xml" in xml else xml
+        return ET.fromstring(xml)
 
-    def device_state(self) -> Dict[str, Any]:
-        """诊断信息：模拟器/adb/u2 atx-agent/App 安装状态。"""
+    def texts(self) -> List[str]:
+        return [n.attrib.get("text") for n in self.dump().iter("node")
+                if (n.attrib.get("text") or "").strip()]
+
+    def find(self, text: str) -> Optional[Tuple[int, int]]:
+        """按精确/前缀文本找第一个可点元素中心坐标。"""
+        for n in self.dump().iter("node"):
+            t = (n.attrib.get("text") or "").strip()
+            if t == text or (len(text) >= 4 and t.startswith(text)):
+                b = n.attrib.get("bounds") or ""
+                if b:
+                    return _center(b)
+        return None
+
+    # ---- 操作 ----
+    def tap(self, x: int, y: int) -> None:
+        self.dev.shell(f"input tap {x} {y}")
+
+    def tap_text(self, text: str, settle: float = 1.5) -> bool:
+        pos = self.find(text)
+        if not pos:
+            return False
+        self.tap(*pos)
+        time.sleep(settle)
+        return True
+
+    def text_input(self, s: str) -> None:
+        """ASCII 输入（手机号/验证码/数字）。中文不支持（adb input 限制）。"""
+        self.dev.shell("input text " + re.sub(r"[^0-9A-Za-z@._-]", "", s))
+
+    def back(self) -> None:
+        self.dev.shell("input keyevent 4")
+
+    def launch(self, pkg: str = HERTZ_PACKAGE) -> None:
+        pid = self.dev.shell(f"pidof {pkg}").strip()
+        if not pid:
+            self.dev.shell(f"am start -n {HERTZ_MAIN}")
+            time.sleep(12)
+
+    # ---- Windows 层截图（adb screencap 抓不到 MuMu 的 GPU 渲染）----
+    def screen(self, name: str = "rpa_screen.png") -> Optional[Path]:
+        import ctypes
+        import ctypes.wintypes as wt
+        from PIL import ImageGrab
+
+        user32 = ctypes.windll.user32
+        target = None
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+        def cb(hwnd, _lp):
+            nonlocal target
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if buf.value == "MuMu模拟器":
+                rc = wt.RECT()
+                user32.GetWindowRect(hwnd, ctypes.byref(rc))
+                w, h = rc.right - rc.left, rc.bottom - rc.top
+                if w > 300:          # 主窗口（多开器等小窗忽略）
+                    target = (rc.left, rc.top, rc.right, rc.bottom)
+            return True
+
+        user32.EnumWindows(cb, 0)
+        if not target:
+            return None
+        self.shots_dir.mkdir(parents=True, exist_ok=True)
+        path = self.shots_dir / name
+        ImageGrab.grab(bbox=target, all_screens=True).save(path)
+        return path
+
+
+class HertzApp(RpaClient):
+    """赫兹商旅查价流程（流程节点按登录后界面逐步校准）。"""
+
+    def state(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"adb_addr": self.adb_addr}
         try:
-            d = self.connect()
             out["connected"] = True
-            out["sdk"] = d.device_info.get("version")
+            out["android"] = self.dev.shell("getprop ro.build.version.release").strip()
+            out["app_pid"] = self.dev.shell(f"pidof {HERTZ_PACKAGE}").strip() or ""
+            out["app_installed"] = bool(self.dev.shell(
+                f"pm list packages | grep {HERTZ_PACKAGE}").strip())
+            ts = self.texts()
+            joined = " ".join(ts)
+            out["at_login"] = any(h in joined for h in LOGIN_HINTS)
+            out["screen_texts"] = ts[:12]
         except Exception as e:  # noqa: BLE001
-            return {**out, "connected": False, "error": str(e)[:160]}
-        try:
-            out["app_installed"] = d.app_info(self.package) is not None
-        except Exception:  # noqa: BLE001
-            out["app_installed"] = False
+            out["connected"] = False
+            out["error"] = str(e)[:160]
         return out
 
-    # ---- App 内固定流程 ----
-    def _open_app(self, d: Any) -> None:
-        d.app_start(self.package)
-        d.wait_timeout = 15
-        # 等首页出现（酒店入口文本）
-        sel = _SELECTORS["home_hotel_btn"]
-        if not d(text=sel).wait(timeout=15):
-            raise RuntimeError("App 首页未出现「酒店」入口：未登录/改版/卡启动页，"
-                               "请在模拟器里人工检查一次")
+    def _require_login(self, texts: List[str]) -> Optional[Dict[str, Any]]:
+        joined = " ".join(texts)
+        if any(h in joined for h in LOGIN_HINTS):
+            return {"ok": False, "source": "app", "reason": "needs_login",
+                    "hint": "模拟器里的赫兹商旅未登录：请在 MuMu 窗口中人工登录一次"
+                            "（南网 SSO），登录态会保留在模拟器里"}
+        return None
 
-    def _dump_visible_texts(self, d: Any) -> List[str]:
-        """当前屏可见文本（查价兜底解析用 + 调试）。"""
-        return [el.get_text() for el in d.xpath("//hierarchy//*").all()
-                if (el.get_text() or "").strip()][:200]
-
-    def probe_hertz(self, hotel: str, checkin: str, checkout: str) -> Dict[str, Any]:
-        """赫兹商旅查价（MVP：读价格列表；选择器需真机校准后启用）。"""
-        base = {"source": "app", "package": self.package}
+    def probe(self, hotel: str = "", checkin: str = "", checkout: str = "",
+              nights: int = 1) -> Dict[str, Any]:
+        """查价 MVP：启动→校验登录→进入酒店列表读价（流程待登录后校准）。"""
+        base = {"source": "app", "package": HERTZ_PACKAGE}
         try:
-            d = self.connect()
+            self.launch()
         except Exception as e:  # noqa: BLE001
-            return {**base, "ok": False, "reason": str(e)[:200]}
-        try:
-            self._open_app(d)
-        except Exception as e:  # noqa: BLE001
-            return {**base, "ok": False, "reason": str(e)[:200]}
-        # TODO(真机校准)：搜索酒店→选日期→进价格列表（选择器见 _SELECTORS）。
-        # 当前 MVP 行为：dump 可见文本 + 正则抽价，返回调试数据。
-        texts = self._dump_visible_texts(d)
-        prices = []
-        pat = re.compile(_SELECTORS["price_pattern"])
-        for t in texts:
-            m = pat.search(t or "")
-            if m:
-                prices.append(int(m.group(1).replace(",", "")))
-        out = {**base, "ok": bool(prices), "prices": sorted(set(prices))[:12],
-               "texts_sample": [t for t in texts if t][:30],
-               "note": "MVP 调试模式：首页文本抽取；搜索流程待真机校准选择器"}
+            return {**base, "ok": False, "reason": f"模拟器不可用: {str(e)[:120]}"}
+        time.sleep(3)
+        texts = self.texts()
+        need = self._require_login(texts)
+        if need:
+            return need
+        # 已登录：抽取当前屏价格（后续校准"酒店搜索→日期→列表"流程后启用）
+        prices = sorted({int(m.replace(",", ""))
+                         for t in texts for m in PRICE_RE.findall(t or "")})
+        shot = self.screen("hertz_probe.png")
+        out = {**base, "ok": bool(prices), "prices": prices[:12],
+               "texts_sample": texts[:30], "screenshot": str(shot) if shot else None,
+               "note": "MVP：当前屏价格抽取；搜索/日期流程待登录后校准"}
         if not prices:
-            out["reason"] = "当前页无可见价格（需先走搜索流程或人工定位一次）"
+            out["reason"] = "当前页无可见价格（需校准搜索流程）"
         return out
 
 
 def probe_app(source: str, hotel: str = "", checkin: str = "",
               checkout: str = "") -> Dict[str, Any]:
-    """统一入口（server/CLI 调用）。source: hertz（后续可扩 ctrip-biz 等）。"""
+    """统一入口（server/CLI 调用）。"""
     if source != "hertz":
         return {"ok": False, "source": "app", "reason": f"未知 App 源: {source}"}
-    prober = AppProber()
-    return prober.probe_hertz(hotel, checkin, checkout)
+    app = HertzApp()
+    if hotel and checkin and checkout:
+        import datetime as _dt
+        ci = _dt.date.fromisoformat(checkin)
+        co = _dt.date.fromisoformat(checkout)
+        return app.probe(hotel, checkin, checkout, (co - ci).days)
+    return app.state()
 
 
 def app_state() -> Dict[str, Any]:
-    return AppProber().device_state()
+    return HertzApp().state()
