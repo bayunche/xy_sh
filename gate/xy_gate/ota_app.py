@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import ctypes
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -32,13 +34,98 @@ def _center(bounds: str) -> Tuple[int, int]:
     return ((x1 + x2) // 2, (y1 + y2) // 2)
 
 
+class NemuBackend:
+    """网易官方外部渲染接口（MAA 同款，external_renderer_ipc.dll）：
+    截图直读渲染帧（无遮挡/无需窗口可见）+ 原生点击/按键/中文输入。"""
+
+    MUMU_ROOT = r"C:\Program Files\Netease\MuMu Player 12"
+
+    def __init__(self, mumu_root: str = None):
+        root = mumu_root or self.MUMU_ROOT
+        dll_path = None
+        for cand in (os.path.join(root, "nx_main", "sdk", "external_renderer_ipc.dll"),
+                     os.path.join(root, "nx_device", "12.0", "shell", "sdk",
+                                  "external_renderer_ipc.dll")):
+            if os.path.exists(cand):
+                dll_path = cand
+                break
+        if not dll_path:
+            raise RuntimeError("external_renderer_ipc.dll 未找到")
+        self.dll = ctypes.CDLL(dll_path)
+        self.dll.nemu_connect.argtypes = [ctypes.c_wchar_p, ctypes.c_int]
+        self.dll.nemu_connect.restype = ctypes.c_void_p
+        self.dll.nemu_get_display_id.argtypes = [ctypes.c_void_p]
+        self.dll.nemu_get_display_id.restype = ctypes.c_int
+        self.dll.nemu_capture_display.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.c_void_p]
+        self.dll.nemu_input_event_touch_down.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self.dll.nemu_input_event_touch_up.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self.dll.nemu_input_event_key_down.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        self.dll.nemu_input_event_key_up.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        self.dll.nemu_input_text.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p]
+        self.dll.nemu_disconnect.argtypes = [ctypes.c_void_p]
+        self.handle = self.dll.nemu_connect(root, 0)
+        if not self.handle:
+            raise RuntimeError("nemu_connect 失败（MuMu 未运行/路径不对）")
+        self.display_id = self.dll.nemu_get_display_id(self.handle)
+
+    def close(self):
+        if getattr(self, "handle", None):
+            self.dll.nemu_disconnect(self.handle)
+            self.handle = None
+
+    def capture(self):
+        """返回 PIL RGB 图像（已垂直翻转，正向画面）。"""
+        from PIL import Image
+        W, H = ctypes.c_int(0), ctypes.c_int(0)
+        r = self.dll.nemu_capture_display(self.handle, self.display_id, 0,
+                                          ctypes.byref(W), ctypes.byref(H), None)
+        if r != 0 or not W.value:
+            raise RuntimeError(f"nemu 探测尺寸失败: {r}")
+        buf = (ctypes.c_ubyte * (W.value * H.value * 4))()
+        r = self.dll.nemu_capture_display(self.handle, self.display_id,
+                                          W.value * H.value * 4,
+                                          ctypes.byref(W), ctypes.byref(H), buf)
+        if r != 0:
+            raise RuntimeError(f"nemu 捕获失败: {r}")
+        img = Image.frombytes("RGBA", (W.value, H.value), bytes(buf), "raw", "RGBA", 0, 1)
+        return img.transpose(Image.FLIP_TOP_BOTTOM).convert("RGB")
+
+    def tap(self, x: int, y: int) -> None:
+        self.dll.nemu_input_event_touch_down(self.handle, self.display_id, x, y)
+        self.dll.nemu_input_event_touch_up(self.handle, self.display_id, x, y)
+
+    def key(self, code: int) -> None:
+        self.dll.nemu_input_event_key_down(self.handle, self.display_id, code)
+        self.dll.nemu_input_event_key_up(self.handle, self.display_id, code)
+
+    def text(self, s: str) -> None:
+        """原生输入（支持中文，UTF-8）。"""
+        self.dll.nemu_input_text(self.handle, self.display_id, s.encode("utf-8"))
+
 class RpaClient:
     """纯 ADB RPA 基元：dump / tap / text / screen / launch。"""
 
     def __init__(self, adb_addr: str = MUMU_ADB, shots_dir: str = "../data/emulator"):
         self.adb_addr = adb_addr
         self._dev = None
+        self._nemu = None
         self.shots_dir = Path(shots_dir)
+
+    @property
+    def nemu(self):
+        """网易官方接口（截图无遮挡/中文输入）；失败返回 None 走 adb 兜底。"""
+        if self._nemu is None:
+            try:
+                self._nemu = NemuBackend()
+            except Exception:
+                self._nemu = False
+        return self._nemu or None
 
     @property
     def dev(self):
@@ -69,9 +156,13 @@ class RpaClient:
                     return _center(b)
         return None
 
-    # ---- 操作 ----
+    # ---- 操作（nemu 官方接口优先，adb 兜底）----
     def tap(self, x: int, y: int) -> None:
-        self.dev.shell(f"input tap {x} {y}")
+        n = self.nemu
+        if n:
+            n.tap(x, y)
+        else:
+            self.dev.shell(f"input tap {x} {y}")
 
     def tap_text(self, text: str, settle: float = 1.5) -> bool:
         pos = self.find(text)
@@ -82,11 +173,19 @@ class RpaClient:
         return True
 
     def text_input(self, s: str) -> None:
-        """ASCII 输入（手机号/验证码/数字）。中文不支持（adb input 限制）。"""
-        self.dev.shell("input text " + re.sub(r"[^0-9A-Za-z@._-]", "", s))
+        """输入（nemu 接口支持中文；adb 兜底仅 ASCII）。"""
+        n = self.nemu
+        if n:
+            n.text(s)
+        else:
+            self.dev.shell("input text " + re.sub(r"[^0-9A-Za-z@._-]", "", s))
 
     def back(self) -> None:
-        self.dev.shell("input keyevent 4")
+        n = self.nemu
+        if n:
+            n.key(4)
+        else:
+            self.dev.shell("input keyevent 4")
 
     def launch(self, pkg: str = HERTZ_PACKAGE) -> None:
         pid = self.dev.shell(f"pidof {pkg}").strip()
@@ -96,6 +195,15 @@ class RpaClient:
 
     # ---- Windows 层截图（adb screencap 抓不到 MuMu 的 GPU 渲染）----
     def screen(self, name: str = "rpa_screen.png") -> Optional[Path]:
+        n = self.nemu
+        if n:
+            try:
+                self.shots_dir.mkdir(parents=True, exist_ok=True)
+                path = self.shots_dir / name
+                n.capture().save(path)
+                return path
+            except Exception:
+                pass   # 落到 Windows 层抓取
         import ctypes
         import ctypes.wintypes as wt
         from PIL import ImageGrab
