@@ -96,7 +96,7 @@ uiautomator dump 里分不清前后台页）。一次查询约 **1.5 分钟**（
 | dsh 大脑隔离 | ✅ | mac 无 NTFS 限制，dsh-home 直接落包内 |
 | 浏览器扫码抓 Cookie | ✅ | Edge/Chrome for Mac（`/Applications` 自动发现） |
 | 酒店三源查价（trip/ly/official） | ✅ | CDP 跨平台，浏览器同上 |
-| **赫兹商旅 App 源（第四源）** | 🔶 待实测 | 当前实现 Windows 专属（MuMu 12 Win + 官方渲染 DLL + WinRT OCR），mac 上优雅降级（返回"模拟器不可用"，**不影响其余三源**）。**已调研出可行路径待 mac 实测**：APK 实为 arm64+v7a 双架构（可在 Apple Silicon 原生跑）→ MuMu Pro Mac（ADB 16384，无外部渲染 SDK）+ `adb screencap` 截图 + macOS Vision OCR（pyobjc）+ 现有 tap/dump/ADBKeyboard 零改动。M 芯片跑不了的是"纯 32 位 App"，与本 App 无关 |
+| **赫兹商旅 App 源（第四源）** | 🔶 已实现待 mac 实测 | 截图/OCR 已做成跨平台后端链（Windows: nemu DLL + WinRT；macOS: `adb screencap` + Vision），点击/布局/中文输入零改动。**mac 用法**：装 MuMu Player Pro（Apple Silicon）→ 模拟器里装「赫兹商旅」App 人工登录一次 → 保持运行（ADB 默认 127.0.0.1:16384，可用环境变量 `XY_APP_ADB` 覆盖）→ `xy-gate hotel-app-state` 检测（返回 ocr_backend/platform）。无需额外装 adb（adbutils 自带）。APK 为 arm64+v7a 双架构，M 芯片原生可跑 |
 | 单测（59 个） | ✅ | CI macos runner 同跑质量门 |
 
 Windows 专属依赖（`winsdk`）已按平台标记，mac 装不上也不会影响安装；App 源

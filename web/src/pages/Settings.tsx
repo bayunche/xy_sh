@@ -362,7 +362,7 @@ export default function Settings() {
       <Section title="赫兹商旅 App（协议价真源）" desc="酒店代订第四源：模拟器里查南网协议价，命中时作为成本基准（优先于携程价）">
         <div className="rounded-lg border border-border bg-muted/40 p-3 space-y-1.5 text-xs text-mutedfg">
           <p className="font-medium text-fg">首次使用需要（一次装好，长期有效）：</p>
-          <p>1. 安装 <a className="underline" href="https://mumu.163.com/" target="_blank" rel="noreferrer">MuMu 模拟器 12</a>（默认实例，ADB 端口 16384）；</p>
+          <p>1. 安装 <a className="underline" href="https://mumu.163.com/" target="_blank" rel="noreferrer">MuMu 模拟器 12</a>（Windows；mac 用 MuMu Player Pro，ADB 端口同为 16384）；</p>
           <p>2. 模拟器里安装「赫兹商旅」App 并<b>人工登录一次</b>（机器人不碰密码，登录态保留在模拟器里）；</p>
           <p>3. 查价时保持 MuMu 开着（最小化可以，全程无需人工操作）。</p>
           <p>每次查价约 1.5~2 分钟（含冷启动）；未配置不影响其他三个查价源。</p>

@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 HERTZ_PACKAGE = "com.ygsoft.mup.businesstravelnw"
 HERTZ_MAIN = f"{HERTZ_PACKAGE}/com.ygsoft.tphone.MainActivity"
-MUMU_ADB = "127.0.0.1:16384"
+MUMU_ADB = os.environ.get("XY_APP_ADB", "127.0.0.1:16384")   # MuMu 实例0；mac=MuMu Pro 默认同号段
 PRICE_RE = re.compile(r"[¥￥]\s*([0-9][0-9,]{2,})")
 LOGIN_HINTS = ("请输入手机号", "请输入密码", "请输入验证码", "账号密码登录", "登录")
 
@@ -118,6 +118,7 @@ class NemuBackend:
 class RpaClient:
 
     _winsdk_engine_cached = None   # 进程内 WinRT OCR 引擎（懒加载；None=未试，False=不可用）
+    _vision_ocr_cached = None      # macOS Vision OCR（懒加载；None=未试，False=不可用）
     """纯 ADB RPA 基元：dump / tap / text / screen / launch。"""
 
     def __init__(self, adb_addr: str = MUMU_ADB, shots_dir: str = "../data/emulator"):
@@ -239,17 +240,25 @@ class RpaClient:
             self.dev.shell(f"am start -n {HERTZ_MAIN}")
             time.sleep(12)
 
-    # ---- Windows 层截图（adb screencap 抓不到 MuMu 的 GPU 渲染）----
+    # ---- 截图存档（nemu → adb screencap → Windows 层抓屏兜底）----
     def screen(self, name: str = "rpa_screen.png") -> Optional[Path]:
+        self.shots_dir.mkdir(parents=True, exist_ok=True)
+        path = self.shots_dir / name
         n = self.nemu
         if n:
             try:
-                self.shots_dir.mkdir(parents=True, exist_ok=True)
-                path = self.shots_dir / name
                 n.capture().save(path)
                 return path
             except Exception:
-                pass   # 落到 Windows 层抓取
+                pass
+        try:
+            self._adb_screenshot().save(path)   # mac（MuMu Pro/真机）主通道
+            return path
+        except Exception:
+            pass
+        import sys as _sys
+        if _sys.platform != "win32":
+            return None
         import ctypes
         import ctypes.wintypes as wt
         from PIL import ImageGrab
@@ -307,6 +316,46 @@ class RpaClient:
 
     # ---- 像素层真相（dump 分不清前后台页：覆盖页节点也带真实 bounds）----
     @classmethod
+    def _vision_ocr_cached(cls):
+        """macOS Vision OCR（pyobjc，zh-Hans，0.1-0.4s/张）——WinRT OCR 的
+        mac 对应物。None=未试，False=不可用（非 mac / 未装 pyobjc）。"""
+        if cls._vision_ocr_cached is None:
+            try:
+                import Vision  # noqa: F401  (pyobjc-framework-Vision)
+                from Foundation import NSURL  # noqa: F401
+                cls._vision_ocr_cached = True
+            except Exception:
+                cls._vision_ocr_cached = False
+        return cls._vision_ocr_cached
+
+    def _ocr_vision(self, png: Path, img_w: int, img_h: int) -> Optional[List[Dict[str, Any]]]:
+        import Vision
+        from Foundation import NSURL
+        if not self._vision_ocr_cached():
+            return None
+        handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(
+            NSURL.fileURLWithPath_(str(png)), None)
+        req = Vision.VNRecognizeTextRequest.alloc().init()
+        req.setRecognitionLanguages_(["zh-Hans", "en-US"])
+        ok, err = handler.performRequests_error_([req], None)
+        if not ok:
+            raise RuntimeError(f"Vision OCR 失败: {err}")
+        out = []
+        for obs in req.results() or []:
+            cand = obs.topCandidates_(1)
+            if not cand:
+                continue
+            top = cand[0]
+            bb = obs.boundingBox()   # 归一化坐标，原点在**左下**
+            x = bb.origin.x * img_w
+            w = bb.size.width * img_w
+            h = bb.size.height * img_h
+            y = (1.0 - bb.origin.y - bb.size.height) * img_h   # 转左上原点
+            out.append({"text": str(top.string()), "x": int(x), "y": int(y),
+                        "w": int(w), "h": int(h)})
+        return out
+
+    @classmethod
     def _winsdk_engine(cls):
         """进程内 WinRT OCR（winsdk 包，同 ocr.ps1 引擎但免 PowerShell 进程
         拉起：实测 0.28s vs ~2s，一次 probe 30-45 次 OCR 是最大耗时项）。"""
@@ -349,19 +398,40 @@ class RpaClient:
 
         return asyncio.run(_run())
 
-    def ocr(self, region=None, scale: int = 1) -> List[Dict[str, Any]]:
-        """nemu 截图 + WinRT OCR → [{text, x, y, w, h, cx, cy}…]。
+    def _adb_screenshot(self):
+        """adb screencap 截图（mac 主通道：MuMu Pro Mac / 真机）。
 
-        坐标=设备像素（截图 1080x1920 与 nemu tap 同一坐标系）。region 裁剪 +
-        scale 放大可救小字/高亮背景格子（WinRT 对低对比小格会整格漏识别）。
-        winsdk 进程内优先；不可用时回退 ocr.ps1（JSON 落文件，stdout 编码不可靠）。"""
+        MuMu **Windows** 的 screencap 抓不到 GPU 合成层（返回白图）——检测到
+        近似单色帧即抛错提示走 nemu，避免下游 OCR 拿到空结果瞎猜。"""
+        img = self.dev.screenshot()   # adbutils 内置（自动处理 \r\n），自带 adb 二进制
+        small = img.convert("L").resize((54, 96))
+        px = list(small.getdata())
+        mean = sum(px) / len(px)
+        var = sum((p - mean) ** 2 for p in px) / len(px)
+        if var < 30:
+            raise RuntimeError(
+                "adb screencap 返回空白/单色帧——MuMu Windows 的 GPU 合成层限制"
+                "（Windows 上截图必须走 nemu 通道）；真机/MuMu Pro Mac 不应出现此错")
+        return img
+
+    def _capture(self):
+        """设备渲染帧：nemu 官方接口（Windows）→ adb screencap（mac/真机）。"""
+        n = self.nemu
+        if n:
+            return n.capture()
+        return self._adb_screenshot()
+
+    def ocr(self, region=None, scale: int = 1) -> List[Dict[str, Any]]:
+        """设备截图 + OCR → [{text, x, y, w, h, cx, cy}…]。
+
+        坐标=设备像素（截图与 tap 同一坐标系）。region 裁剪 + scale 放大可救
+        小字/高亮背景格子。OCR 后端链：winsdk(Win) → Vision(mac) → ocr.ps1
+        (Win 兜底；JSON 落文件，stdout 编码不可靠)。"""
         import json as _json
         import subprocess
-        n = self.nemu
-        if not n:
-            raise RuntimeError("nemu 截图不可用（OCR 依赖像素层）")
+        import sys as _sys
         self.shots_dir.mkdir(parents=True, exist_ok=True)
-        img = n.capture()
+        img = self._capture()
         if region:
             img = img.crop(region)
         if scale > 1:
@@ -375,6 +445,11 @@ class RpaClient:
         except Exception:
             data = None
         if data is None:
+            try:
+                data = self._ocr_vision(png, img.width, img.height)
+            except Exception:
+                data = None
+        if data is None and _sys.platform == "win32":
             ocr_ps1 = Path(__file__).resolve().parent.parent / "tools" / "ocr.ps1"
             subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
@@ -382,6 +457,9 @@ class RpaClient:
                 capture_output=True, timeout=40)
             raw = (self.shots_dir / "_ocr_tmp.png.ocr.json").read_text("utf-8-sig").strip()
             data = _json.loads(raw) if raw and raw != "[]" else []
+        if data is None:
+            raise RuntimeError("无可用 OCR 后端（Windows: winsdk/ocr.ps1；macOS: "
+                               "pip install pyobjc-framework-Vision）")
         ox, oy = (region[0], region[1]) if region else (0, 0)
         for d in data:
             d["x"] = ox + d["x"] // scale
@@ -426,6 +504,8 @@ class RpaClient:
             return "city"
         if "选择日期" in s:
             return "calendar"
+        if "凌晨" in s and "提示" in s and "入住" in s:
+            return "wee-hours"   # 凌晨查当天入住弹窗（盖在搜索页上，须先判）
         if "出差申请" in s and "仅查询" in s:
             return "apply-overlay"
         if "查询" in s and ("请选择城市" in s or "关键字" in s):
@@ -436,18 +516,40 @@ class RpaClient:
             return "list"
         return "other"
 
+    def _dismiss_wee_hours(self) -> bool:
+        """凌晨（~0-6点）查当天入住弹「是否凌晨入住」提示——点「否」保持
+        当天入住（点「是」会把入住日期改成前一天，破坏查询口径）。
+
+        OCR 常漏读/误读弹窗单字按钮（实测"否"整行漏读、"是"→"疋"），
+        dump 兜底找可点的"否"。"""
+        if self.ocr_tap("否", settle=1.5):
+            return True
+        for n in self.dump().iter("node"):
+            if (n.attrib.get("text") or "").strip() == "否" \
+                    and n.attrib.get("clickable") == "true":
+                pos = _center(n.attrib.get("bounds") or "")
+                if pos != (0, 0):
+                    self.tap(*pos)
+                    time.sleep(1.5)
+                    return True
+        return False
+
 
 class HertzApp(RpaClient):
     """赫兹商旅查价流程（流程节点按登录后界面逐步校准）。"""
 
     def state(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {"adb_addr": self.adb_addr}
+        import sys as _sys
+        out: Dict[str, Any] = {"adb_addr": self.adb_addr,
+                               "platform": _sys.platform}
         try:
             out["connected"] = True
             out["android"] = self.dev.shell("getprop ro.build.version.release").strip()
             out["app_pid"] = self.dev.shell(f"pidof {HERTZ_PACKAGE}").strip() or ""
             out["app_installed"] = bool(self.dev.shell(
                 f"pm list packages | grep {HERTZ_PACKAGE}").strip())
+            out["ocr_backend"] = ("winsdk" if self._winsdk_engine()
+                                  else "vision" if self._vision_ocr_cached() else "ps1/无")
             ts = self.texts()
             joined = " ".join(ts)
             out["at_login"] = any(h in joined for h in LOGIN_HINTS)
@@ -455,6 +557,12 @@ class HertzApp(RpaClient):
         except Exception as e:  # noqa: BLE001
             out["connected"] = False
             out["error"] = str(e)[:160]
+            if _sys.platform == "darwin":
+                out["hint"] = ("mac 需要：MuMu Player Pro（Apple Silicon，装「赫兹商旅」"
+                               "App 并人工登录一次）保持运行；连接地址可用环境变量 "
+                               "XY_APP_ADB 覆盖（默认 127.0.0.1:16384）")
+            else:
+                out["hint"] = "Windows 需要：MuMu 模拟器 12 保持运行（ADB 16384）"
         return out
 
     def _require_login(self, texts: List[str]) -> Optional[Dict[str, Any]]:
@@ -523,6 +631,9 @@ class HertzApp(RpaClient):
             if st == "apply-overlay":
                 self.ocr_tap("仅查询", settle=1.5)   # 出差申请弹层的跳过钮
                 continue
+            if st == "wee-hours":
+                self._dismiss_wee_hours()
+                continue
             if st == "city":
                 self.back(); time.sleep(1.2)
                 continue
@@ -567,6 +678,8 @@ class HertzApp(RpaClient):
         while st != target and time.time() < deadline:
             if st == "apply-overlay":
                 self.ocr_tap("仅查询", settle=2.0)
+            elif st == "wee-hours":
+                self._dismiss_wee_hours()
             else:
                 time.sleep(poll)
             st = self.screen_state()
@@ -817,15 +930,18 @@ class HertzApp(RpaClient):
             if not self._date_row_ok(want_ci, want_co):
                 if not self._select_dates(checkin, checkout):
                     return {**base, "ok": False, "reason": f"日期选择失败: {checkin}~{checkout}"}
-        # 查询→列表（点查询也可能再弹申请单弹层，逐状态推进）
+        # 查询→列表（点查询也可能再弹申请单弹层/凌晨入住提示，逐状态推进）
         at_list = False
-        for _ in range(4):
+        for _ in range(5):
             st = self.screen_state()
             if st == "list":
                 at_list = True
                 break
             if st == "apply-overlay":
                 self.ocr_tap("仅查询", settle=2.0)
+                continue
+            if st == "wee-hours":
+                self._dismiss_wee_hours()
                 continue
             if st == "search":
                 if not self.ocr_tap("查询", settle=4):
