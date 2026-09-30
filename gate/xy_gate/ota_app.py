@@ -320,6 +320,28 @@ class HertzApp(RpaClient):
     def _at_page(self, frag: str) -> bool:
         return any(frag in (t or "") for t in self.texts() if (t or "").startswith("pages/"))
 
+    def ensure_search_ready(self, timeout_s: int = 20) -> bool:
+        """搜索页就绪：无弹层遮挡（出差申请弹层/城市浮层），字段+查询按钮可用。"""
+        import time as _t
+        deadline = _t.time() + timeout_s
+        while _t.time() < deadline:
+            ts = self.texts()
+            has_query = any(t == "查询" for t in ts)
+            has_field = any(t == "请选择城市" for t in ts) or any(
+                t == "酒店名/工作圈/关键字" or t == "酒店名/商圈/关键字" for t in ts)
+            overlay = any(t == "选择出差申请" or t == "出差申请" for t in ts) and not has_query
+            city_open = any(t == "热门城市" for t in ts)
+            if has_query and has_field and not overlay and not city_open:
+                return True
+            if overlay or "仅查询" in ts:
+                self.tap_text("仅查询", settle=1.2)
+                continue
+            if city_open:
+                self.back(); _t.sleep(1.2)
+                continue
+            _t.sleep(1)
+        return False
+
     def _goto_hotel_search(self) -> bool:
         """确保停在 book-hotel 搜索页（从首页进入；处理'仅查询'弹层）。"""
         for _ in range(4):
@@ -349,7 +371,8 @@ class HertzApp(RpaClient):
                     time.sleep(1)
                     if not any(t == "热门城市" for t in self.texts()):
                         return True   # 城市页已关=选择成功
-            elif any((t or "").strip() == city for t in ts):
+            elif not any(t == "请选择城市" for t in self.texts()) and any(
+                    (t or "").strip() == city for t in self.texts()):
                 return True           # 字段已是目标城市
             self.back(); time.sleep(1.5)
         return False
@@ -359,29 +382,54 @@ class HertzApp(RpaClient):
         import datetime as dt
         ci = dt.date.fromisoformat(checkin)
         co = dt.date.fromisoformat(checkout)
-        # 点日期字段开日历：优先当前显示的入住日（MM月DD日），否则"今天"
-        opened = False
-        for n in self.dump().iter("node"):
-            t = (n.attrib.get("text") or "").strip()
-            if re.match(r"^\d{2}月\d{2}日$", t):
-                pos = _center(n.attrib.get("bounds") or "")
-                if pos != (0, 0):
-                    self.tap(*pos); time.sleep(3); opened = True
-                    break
-        if not opened and not self.tap_text("今天", settle=3):
-            return False
+        # 开日历：已开着就不点（再点会 toggle 关掉）
+        if not any(t == "选择日期" for t in self.texts()):
+            opened = False
+            for n in self.dump().iter("node"):
+                t = (n.attrib.get("text") or "").strip()
+                if re.match(r"^\d{2}月\d{2}日$", t):
+                    pos = _center(n.attrib.get("bounds") or "")
+                    if pos != (0, 0):
+                        self.tap(*pos); time.sleep(3); opened = True
+                        break
+            if not opened and not self.tap_text("今天", settle=3):
+                return False
+            if not any(t == "选择日期" for t in self.texts()):
+                return False
         ym = f"{ci.year}年{ci.month}月"
+        self._current_ym = ym
         root = self.dump()
-        for _ in range(5):
+        # 双向滚动：目标月标题进 200~1100（其下格子才在屏内）；未渲染时按可见月份判方向
+        for i in range(12):
             y = self._text_y(root, ym)
-            if y is not None and 100 < y < 1500:
+            if y is not None and 200 < y < 1100:
                 break
-            self.dev.shell("input swipe 540 1500 540 700 400")
-            time.sleep(1.2)
+            if not y or y == 0:
+                vis = []
+                for n in root.iter("node"):
+                    tt = (n.attrib.get("text") or "").strip()
+                    if re.match(r"^20\d{2}年\d{1,2}月$", tt):
+                        yy = self._text_y(root, tt)
+                        if yy and yy > 0:
+                            vis.append((yy, tt))
+                if not vis:
+                    return False
+                vis.sort()
+                # 可见月都在屏幕中下部 → 目标月在上方 → 下拉；反之亦然
+                if vis[0][0] > 500:
+                    self.dev.shell("input swipe 540 900 540 1500 350")
+                else:
+                    self.dev.shell("input swipe 540 1500 540 900 350")
+            elif y >= 1100:
+                self.dev.shell("input swipe 540 1400 540 1000 300")
+            else:
+                self.dev.shell("input swipe 540 1000 540 1400 300")
+            time.sleep(1.0)
             root = self.dump()
         else:
             return False
         y_end = self._text_y(root, f"{co.year}年{co.month}月") or 99999
+        self._current_ym = ym
         if not self._tap_day_in(root, ci.day, y, y_end):
             return False
         time.sleep(1)
@@ -399,17 +447,49 @@ class HertzApp(RpaClient):
         return None
 
     def _tap_day_in(self, root, day: int, y_top: int, y_bottom: int) -> bool:
+        """格子文本=节日+日+标记；必须格子本身在屏内才可点，屏外则小步滚动。"""
         pat = re.compile(r"^(?:[\u4e00-\u9fa5]{0,4})?" + str(day) + r"(?:入住|离店|在店)?$")
-        for n in root.iter("node"):
-            t = (n.attrib.get("text") or "").strip()
-            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
-            if t and m and pat.match(t) and n.attrib.get("clickable") == "true":
-                cy = (int(m.group(2)) + int(m.group(4))) // 2
-                if y_top < cy < y_bottom and 0 < cy < 1850:
-                    x = (int(m.group(1)) + int(m.group(3))) // 2
-                    self.tap(x, cy)
-                    return True
+        for attempt in range(12):
+            hit_offscreen = False
+            for n in root.iter("node"):
+                t = (n.attrib.get("text") or "").strip()
+                m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
+                if t and m and pat.match(t) and n.attrib.get("clickable") == "true":
+                    cy = (int(m.group(2)) + int(m.group(4))) // 2
+                    if y_top < cy < y_bottom and 0 < cy < 1780:
+                        x = (int(m.group(1)) + int(m.group(3))) // 2
+                        self.tap(x, cy)
+                        return True
+                    hit_offscreen = True   # 找到格子但屏外/未渲染
+                    break
+            if not hit_offscreen:
+                return False              # 连格子都没有（月份不对）
+            # 方向：按渲染中的最近月份判断目标月在上方（下拉）还是下方（上滚）
+            self.dev.shell(self._calendar_swipe_cmd(root, getattr(self, "_current_ym", "")))
+            time.sleep(1.0)
+            root = self.dump()
+            y_top = self._text_y(root, getattr(self, "_current_ym", "")) or y_top
         return False
+
+    @staticmethod
+    def _month_value(ym: str):
+        m = re.match(r"(\d{4})年(\d{1,2})月", ym or "")
+        return int(m.group(1)) * 12 + int(m.group(2)) if m else None
+
+    def _calendar_swipe_cmd(self, root, target_ym: str) -> str:
+        tv = self._month_value(target_ym)
+        vis = []
+        for n in root.iter("node"):
+            tt = (n.attrib.get("text") or "").strip()
+            if re.match(r"^20\d{2}年\d{1,2}月$", tt):
+                yy = self._text_y(root, tt)
+                if yy and yy > 0:
+                    vis.append((self._month_value(tt), yy))
+        if vis and tv is not None:
+            nearest = min(vis, key=lambda v: abs(v[0] - tv))
+            if nearest[0] > tv:
+                return "input swipe 540 900 540 1500 350"    # 目标在上方→下拉
+        return "input swipe 540 1500 540 800 350"            # 默认上滚
 
     def _read_hotel_list(self) -> List[Dict[str, Any]]:
         """读列表页价格行（滚动合并）；名称与价格按序配对。"""
@@ -455,6 +535,8 @@ class HertzApp(RpaClient):
             self.back(); time.sleep(1.2)
         if not self._goto_hotel_search():
             return {**base, "ok": False, "reason": "未能进入酒店搜索页（App 改版或卡顿）"}
+        if not self.ensure_search_ready():
+            return {**base, "ok": False, "reason": "搜索页被弹层占用且无法清理（出差申请/城市浮层）"}
         # 清理遮挡浮层（历史记录/日历）
         for _ in range(2):
             ts = self.texts()
@@ -462,9 +544,10 @@ class HertzApp(RpaClient):
                 self.back(); time.sleep(1.5)
             else:
                 break
-        # 城市已是目标则跳过（字段显示城市名而非"请选择城市"）
-        already = any((t or "").strip() == city for t in self.texts())
-        if not already and not self._select_city(city):
+        # 城市字段已显示目标城市才跳过（历史记录里出现城市名不算）
+        field_is_city = (not any(t == "请选择城市" for t in self.texts())
+                         and any((t or "").strip() == city for t in self.texts()))
+        if not field_is_city and not self._select_city(city):
             return {**base, "ok": False, "reason": f"城市选择失败: {city}（支持热门城市直点，其他待字母索引校准）"}
         if checkin and checkout:
             import re as _re9
