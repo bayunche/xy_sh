@@ -27,18 +27,29 @@ DEBUG_PORTS = (9222, 9223, 9224)
 POLL_INTERVAL = 2.5
 TIMEOUT_SEC = 300   # 5 分钟内未登录则超时
 
-# Windows 常见浏览器路径（按优先级），其次 PATH 上的 chromium/msedge/chrome
+# Windows 常见浏览器路径（按优先级）；mac 走 /Applications 包内可执行文件；
+# 其余 unix 走 PATH 上的 chromium/msedge/chrome
 _WIN_CANDIDATES = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 ]
+_MAC_CANDIDATES = [
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    str(Path.home() / "Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+    str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+]
 _UNIX_CANDIDATES = ["chromium", "chromium-browser", "google-chrome", "msedge", "chrome"]
 
 
 def find_browser() -> Optional[str]:
-    for cand in _WIN_CANDIDATES:
+    import sys
+    cands = _WIN_CANDIDATES if sys.platform == "win32" else \
+        (_MAC_CANDIDATES if sys.platform == "darwin" else [])
+    for cand in cands:
         if Path(cand).exists():
             return cand
     for name in _UNIX_CANDIDATES:
