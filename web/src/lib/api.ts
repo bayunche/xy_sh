@@ -49,3 +49,5 @@ export const markConversationRead = (chat: string) =>
 
 export const postHotelCost = (hotel: string, price?: number) =>
   api("/api/hotel/cost", { method: "POST", body: JSON.stringify({ hotel, price }) });
+
+export const getHotelAppState = () => api("/api/hotel/app-state");

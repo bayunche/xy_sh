@@ -116,6 +116,8 @@ class NemuBackend:
         self.dll.nemu_input_text(self.handle, self.display_id, s.encode("utf-8"))
 
 class RpaClient:
+
+    _winsdk_engine_cached = None   # 进程内 WinRT OCR 引擎（懒加载；None=未试，False=不可用）
     """纯 ADB RPA 基元：dump / tap / text / screen / launch。"""
 
     def __init__(self, adb_addr: str = MUMU_ADB, shots_dir: str = "../data/emulator"):
@@ -304,12 +306,55 @@ class RpaClient:
         return path
 
     # ---- 像素层真相（dump 分不清前后台页：覆盖页节点也带真实 bounds）----
+    @classmethod
+    def _winsdk_engine(cls):
+        """进程内 WinRT OCR（winsdk 包，同 ocr.ps1 引擎但免 PowerShell 进程
+        拉起：实测 0.28s vs ~2s，一次 probe 30-45 次 OCR 是最大耗时项）。"""
+        if cls._winsdk_engine_cached is None:
+            try:
+                from winsdk.windows.media.ocr import OcrEngine
+                from winsdk.windows.globalization import Language
+                cls._winsdk_engine_cached = OcrEngine.try_create_from_language(
+                    Language("zh-CN")) or False
+            except Exception:
+                cls._winsdk_engine_cached = False
+        return cls._winsdk_engine_cached or None
+
+    def _ocr_winsdk(self, png: Path) -> Optional[List[Dict[str, Any]]]:
+        import asyncio
+        from winsdk.windows.graphics.imaging import BitmapDecoder
+        from winsdk.windows.storage import StorageFile, FileAccessMode
+        eng = self._winsdk_engine()
+        if not eng:
+            return None
+
+        async def _run():
+            sf = await StorageFile.get_file_from_path_async(str(png))
+            stream = await sf.open_async(FileAccessMode.READ)
+            dec = await BitmapDecoder.create_async(stream)
+            bmp = await dec.get_software_bitmap_async()
+            res = await eng.recognize_async(bmp)
+            out = []
+            for line in res.lines:
+                ws = list(line.words)
+                if not ws:
+                    continue
+                x1 = min(w.bounding_rect.x for w in ws)
+                y1 = min(w.bounding_rect.y for w in ws)
+                x2 = max(w.bounding_rect.x + w.bounding_rect.width for w in ws)
+                y2 = max(w.bounding_rect.y + w.bounding_rect.height for w in ws)
+                out.append({"text": line.text, "x": int(x1), "y": int(y1),
+                            "w": int(x2 - x1), "h": int(y2 - y1)})
+            return out
+
+        return asyncio.run(_run())
+
     def ocr(self, region=None, scale: int = 1) -> List[Dict[str, Any]]:
         """nemu 截图 + WinRT OCR → [{text, x, y, w, h, cx, cy}…]。
 
         坐标=设备像素（截图 1080x1920 与 nemu tap 同一坐标系）。region 裁剪 +
         scale 放大可救小字/高亮背景格子（WinRT 对低对比小格会整格漏识别）。
-        stdout 编码不可靠，ocr.ps1 把 JSON 落文件（utf-8），这里读文件。"""
+        winsdk 进程内优先；不可用时回退 ocr.ps1（JSON 落文件，stdout 编码不可靠）。"""
         import json as _json
         import subprocess
         n = self.nemu
@@ -324,15 +369,19 @@ class RpaClient:
             img = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
         png = self.shots_dir / "_ocr_tmp.png"
         img.save(png)
-        ocr_ps1 = Path(__file__).resolve().parent.parent / "tools" / "ocr.ps1"
-        subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-             str(ocr_ps1), str(png)],
-            capture_output=True, timeout=40)
-        raw = (self.shots_dir / "_ocr_tmp.png.ocr.json").read_text("utf-8-sig").strip()
-        if not raw or raw == "[]":
-            return []
-        data = _json.loads(raw)
+        data = None
+        try:
+            data = self._ocr_winsdk(png)
+        except Exception:
+            data = None
+        if data is None:
+            ocr_ps1 = Path(__file__).resolve().parent.parent / "tools" / "ocr.ps1"
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                 str(ocr_ps1), str(png)],
+                capture_output=True, timeout=40)
+            raw = (self.shots_dir / "_ocr_tmp.png.ocr.json").read_text("utf-8-sig").strip()
+            data = _json.loads(raw) if raw and raw != "[]" else []
         ox, oy = (region[0], region[1]) if region else (0, 0)
         for d in data:
             d["x"] = ox + d["x"] // scale
@@ -501,7 +550,7 @@ class HertzApp(RpaClient):
             # home / other：点"酒店预订"**图标**（真实触控目标=标签上方 ~110px
             # 的 147x147 图标 TextView，标签本身不响应）；**不要先下拉复位**
             # （冷启后下拉会触发首页刷新动画，吃掉后续点击）。
-            if self.ocr_tap("酒店预订", settle=4, dy=-110):
+            if self.ocr_tap("酒店预订", settle=3.5, dy=-110):
                 time.sleep(1)
                 continue
             self.dev.shell("input swipe 540 700 540 1500 300")
@@ -570,7 +619,7 @@ class HertzApp(RpaClient):
                 pos = min(cands, key=lambda p: p[1]) if cands else None
             if pos:
                 self.tap(*pos)
-                time.sleep(3)
+                time.sleep(2)
                 field = self._city_field_ocr()
                 if field and field[0] == city_n:
                     return True                   # 字段已变=真成功
@@ -690,12 +739,14 @@ class HertzApp(RpaClient):
                 return "input swipe 540 900 540 1500 350"    # 目标在上方→下拉
         return "input swipe 540 1500 540 800 350"            # 默认上滚
 
-    def _read_hotel_list(self) -> List[Dict[str, Any]]:
+    def _read_hotel_list(self, max_screens: int = 5) -> List[Dict[str, Any]]:
         """读列表页价格行（OCR 像素层，滚动合并）；酒店名与其后出现的价格按
-        阅读序配对。"""
+        阅读序配对。连续两屏无新增才收手（列表加载/滚动动画中会有假空屏）。"""
         out: Dict[str, Dict[str, Any]] = {}
         cur_name: Optional[str] = None
-        for _ in range(4):
+        no_gain = 0
+        for screen in range(max_screens):
+            before = len(out)
             for d in sorted(self.ocr(), key=lambda d: (d["cy"], d["cx"])):
                 t = _norm(d["text"])
                 pm = re.search(r"[¥￥]\s*([0-9][0-9,]*\.?[0-9]*)\s*起", t)
@@ -705,8 +756,12 @@ class HertzApp(RpaClient):
                         out[key] = {"price_text": d["text"], "name": cur_name,
                                     "price": round(float(pm.group(1).replace(",", "")))}
                 elif 4 < len(t) < 30 and any(k in t for k in ("酒店", "公寓", "宾馆")) \
-                        and "关键字" not in t and "协议" not in t and "差标" not in t:
+                        and "关键字" not in t and "酒店名" not in t and "/" not in t \
+                        and "协议" not in t and "差标" not in t:
                     cur_name = t
+            no_gain = no_gain + 1 if (screen >= 1 and len(out) == before) else 0
+            if no_gain >= 2:
+                break                      # 连续两屏无新增 → 到底了
             self.dev.shell("input swipe 540 1500 540 700 300")
             time.sleep(1.5)
         return list(out.values())
@@ -721,9 +776,12 @@ class HertzApp(RpaClient):
         self.dev.shell(f"am start -n {HERTZ_MAIN}")
         deadline = time.time() + wait_s
         while time.time() < deadline:
-            time.sleep(2)
-            if "index-travel" in self._fg_page_name():
-                return True
+            time.sleep(1.5)
+            try:
+                if self.screen_state() == "home":
+                    return True
+            except Exception:   # noqa: BLE001  冷启初期 nemu/OCR 可能瞬时不可用
+                pass
         return False
 
     def probe(self, hotel: str = "", checkin: str = "", checkout: str = "",
@@ -770,7 +828,7 @@ class HertzApp(RpaClient):
                 self.ocr_tap("仅查询", settle=2.0)
                 continue
             if st == "search":
-                if not self.ocr_tap("查询", settle=6):
+                if not self.ocr_tap("查询", settle=4):
                     time.sleep(1.5)
                 continue
             time.sleep(1.5)

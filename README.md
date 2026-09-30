@@ -21,6 +21,7 @@
 | 功能 | 说明 | SOP |
 |---|---|---|
 | 查价 | PC 搜索同款 + 中位价/四分位统计，支撑报价与每日审计 | sop-price-audit |
+| 酒店代订报价 | 四源查价：携程(trip 镜像)/同程/官网(集团+协议码)/**赫兹商旅 App(协议价真源)** + 阶梯加价闸门 | 技能 xianyu-hotel-quote |
 | 自动回复 | 关键词秒答 → dsh 大脑拟人回复（询价/砍价/催发货/咨询）→ 风险话题转人工 | sop-inbound-message |
 | 议价自动成交 | 买家出价 ≥ 底价 → 自动改价 + 引导拍下（改价需鱼小铺，未开通则口头成交转人工） | sop-bargain-close |
 | 自动确认交易 | 买家付款 → 自动发货内容表 → 七道风控闸门 → consign.dummy 确认 → 通知买家 | sop-order-lifecycle |
@@ -58,6 +59,34 @@ uv run --project gate xy-gate search "Switch OLED 日版"   # 真查价（只读
 观察 dry-run 台账（`data/` sqlite、`xy-gate confirms`/`events`）一周没问题后，
 改 `config/robot.yaml`：`mode: live` + `auto_confirm.enabled: true`（并按需调
 白名单/金额上限）再重启。**确认交易默认关、金额默认上限 ¥100。**
+
+## 酒店代订：四源查价（含赫兹商旅 App 协议价源）
+
+酒店代订报价用四个价格源交叉取最低成本：**trip**（Trip.com 携程镜像，免登录真价，
+基准源）/ **ly**（同程，需登录一次）/ **official**（酒店官网，集团注册表 + 商旅
+协议码自动填入）/ **app**（**赫兹商旅 App，南网协议价真源**——协议价常显著低于
+OTA 价，命中时作为成本基准）。
+
+```bash
+uv run --project gate xy-gate hotel-probe --source app --kw "亚朵" \
+    --checkin 2026-10-01 --checkout 2026-10-03
+```
+
+**App 源前置条件（一次装好，长期有效）**：
+
+1. 装 [MuMu 模拟器 12](https://mumu.163.com/)（默认实例 0，ADB 端口 16384）；
+2. 在模拟器里安装「赫兹商旅」App 并**人工登录一次**（南网 SSO，登录态保留在
+   模拟器里，机器人不碰密码）；登录后若停在「因私出行」入口，走因公首页的
+   「酒店预订」即可（流程自动处理出差申请弹层）；
+3. 查价时**保持 MuMu 开着**（最小化可以，全程无需人工操作）；
+4. 检测状态：`uv run --project gate xy-gate hotel-app-state`。
+
+技术形态：纯 ADB + MuMu 官方外部渲染接口（MAA 同款，**零注入**——该 App 有
+加固壳，注入式自动化会触发自杀），截图 OCR 走像素层判定（Weex 页面栈在
+uiautomator dump 里分不清前后台页）。一次查询约 **1.5 分钟**（含每次 force-stop
+冷启动——App 渲染层长时间自动化后会崩灰屏，冷启动是唯一恢复手段），支持热门
+城市直点。详见 [docs/protocol-notes.md](docs/protocol-notes.md)。
+
 
 ## dsh 大脑怎么被拉起
 

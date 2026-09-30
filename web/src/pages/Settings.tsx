@@ -6,8 +6,8 @@ import { Input, Textarea, Select, Label } from "@/components/ui/input";
 import { Field } from "@/components/ui/misc";
 import { Switch } from "@/components/ui/switch";
 import { Spinner, ErrorText } from "@/components/ui/misc";
-import { getSettings, putSettings, getDshKey, putDshKey, getAccount, putAccount, captureStart, captureStatus, captureStop, postHotelCost } from "@/lib/api";
-import { Save, KeyRound, Cookie, Plus, Trash2, ScanLine, Hotel } from "lucide-react";
+import { getSettings, putSettings, getDshKey, putDshKey, getAccount, putAccount, captureStart, captureStatus, captureStop, postHotelCost, getHotelAppState } from "@/lib/api";
+import { Save, KeyRound, Cookie, Plus, Trash2, ScanLine, Hotel, Smartphone } from "lucide-react";
 
 function Section({ title, desc, children }: { title: string; desc?: string; children: React.ReactNode }) {
   return (
@@ -31,6 +31,8 @@ export default function Settings() {
   const [model, setModel] = React.useState("");
   const [hcost, setHcost] = React.useState({ hotel: "", price: "" });
   const [hcostMsg, setHcostMsg] = React.useState("");
+  const [appState, setAppState] = React.useState<any>(null);
+  const [appChecking, setAppChecking] = React.useState(false);
   const [acct, setAcct] = React.useState<any>(null);
   const [cookie, setCookie] = React.useState("");
   const [cookieMsg, setCookieMsg] = React.useState("");
@@ -354,6 +356,41 @@ export default function Settings() {
             <Hotel size={14} /> 写入补价
           </Button>
           {hcostMsg && <span className="text-xs text-mutedfg">{hcostMsg}</span>}
+        </div>
+      </Section>
+
+      <Section title="赫兹商旅 App（协议价真源）" desc="酒店代订第四源：模拟器里查南网协议价，命中时作为成本基准（优先于携程价）">
+        <div className="rounded-lg border border-border bg-muted/40 p-3 space-y-1.5 text-xs text-mutedfg">
+          <p className="font-medium text-fg">首次使用需要（一次装好，长期有效）：</p>
+          <p>1. 安装 <a className="underline" href="https://mumu.163.com/" target="_blank" rel="noreferrer">MuMu 模拟器 12</a>（默认实例，ADB 端口 16384）；</p>
+          <p>2. 模拟器里安装「赫兹商旅」App 并<b>人工登录一次</b>（机器人不碰密码，登录态保留在模拟器里）；</p>
+          <p>3. 查价时保持 MuMu 开着（最小化可以，全程无需人工操作）。</p>
+          <p>每次查价约 1.5~2 分钟（含冷启动）；未配置不影响其他三个查价源。</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" disabled={appChecking}
+            onClick={async () => {
+              setAppChecking(true); setAppState(null);
+              try { setAppState(await getHotelAppState()); } catch (e: any) { setAppState({ connected: false, error: String(e) }); }
+              setAppChecking(false);
+            }}>
+            <Smartphone size={14} /> 检测 App 源状态
+          </Button>
+          {appChecking && <Spinner />}
+          {appState && !appChecking && (
+            <span className="text-xs">
+              {appState.connected ? (
+                <>
+                  <Badge tone={appState.app_installed && appState.app_pid ? "success" : appState.app_installed ? "warn" : "danger"}>
+                    {appState.app_installed ? (appState.app_pid ? "模拟器已连接 · App 运行中" : "模拟器已连接 · App 未运行（查价时自动拉起）") : "模拟器已连接 · 未装 App"}
+                  </Badge>
+                  {appState.at_login && <Badge tone="warn">App 未登录：请在 MuMu 里人工登录一次</Badge>}
+                </>
+              ) : (
+                <Badge tone="danger">模拟器未连接：{appState.error || "MuMu 没开或 ADB 不通"}</Badge>
+              )}
+            </span>
+          )}
         </div>
       </Section>
 
