@@ -26,6 +26,13 @@ PRICE_RE = re.compile(r"[¥￥]\s*([0-9][0-9,]{2,})")
 LOGIN_HINTS = ("请输入手机号", "请输入密码", "请输入验证码", "账号密码登录", "登录")
 
 
+def _norm(s: str) -> str:
+    """OCR 比较归一化：去全部空白（WinRT 汉字间插空格）+ 剥前导杂符
+    （OCR 常给行加 "-" / "·" 前缀，如 "-10月01日"）。"""
+    s = re.sub(r"\s+", "", s or "")
+    return re.sub(r"^[\-—·:：,。'']+", "", s)
+
+
 def _center(bounds: str) -> Tuple[int, int]:
     m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds or "")
     if not m:
@@ -147,14 +154,51 @@ class RpaClient:
                 if (n.attrib.get("text") or "").strip()]
 
     def find(self, text: str) -> Optional[Tuple[int, int]]:
-        """按精确/前缀文本找第一个可点元素中心坐标。"""
+        """按精确/前缀文本找第一个**可见**元素中心坐标。
+
+        隐藏节点（bounds=[0,0][0,0]，虚拟化列表未渲染/历史残留）必须跳过——
+        实测城市页的历史记录里藏着同名文本，点到 (0,0) 造成静默失败。"""
         for n in self.dump().iter("node"):
             t = (n.attrib.get("text") or "").strip()
             if t == text or (len(text) >= 4 and t.startswith(text)):
                 b = n.attrib.get("bounds") or ""
-                if b:
-                    return _center(b)
+                m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", b)
+                if not m:
+                    continue
+                x1, y1, x2, y2 = map(int, m.groups())
+                if x2 > x1 and y2 > y1:          # 退化 bounds=隐藏，跳过
+                    return ((x1 + x2) // 2, (y1 + y2) // 2)
         return None
+
+    def visible_nodes(self):
+        """[（文本, 可点, 中心坐标, y中心)…] 只含屏幕内真实渲染的节点。"""
+        out = []
+        for n in self.dump().iter("node"):
+            t = (n.attrib.get("text") or "").strip()
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
+            if not (t and m):
+                continue
+            x1, y1, x2, y2 = map(int, m.groups())
+            if x2 > x1 and y2 > y1 and 0 < (y1 + y2) // 2 < 1850:
+                out.append((t, n.attrib.get("clickable") == "true",
+                            ((x1 + x2) // 2, (y1 + y2) // 2), (y1 + y2) // 2))
+        return out
+
+    def fg_visible_nodes(self):
+        """前台页面子树的可见节点：背景页同名节点（如历史记录里的城市/价格）
+        会造成误点误读，一切交互定位都应基于本方法。"""
+        _, scope = self._fg_scope()
+        out = []
+        for n in scope.iter("node"):
+            t = (n.attrib.get("text") or "").strip()
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
+            if not (t and m):
+                continue
+            x1, y1, x2, y2 = map(int, m.groups())
+            if x2 > x1 and y2 > y1 and 0 < (y1 + y2) // 2 < 1850:
+                out.append((t, n.attrib.get("clickable") == "true",
+                            ((x1 + x2) // 2, (y1 + y2) // 2), (y1 + y2) // 2))
+        return out
 
     # ---- 操作（nemu 官方接口优先，adb 兜底）----
     def tap(self, x: int, y: int) -> None:
@@ -259,6 +303,90 @@ class RpaClient:
         user32.SetWindowPos(hwnd_mu, -2, 0, 0, 0, 0, 0x0003)   # 取消 TOPMOST
         return path
 
+    # ---- 像素层真相（dump 分不清前后台页：覆盖页节点也带真实 bounds）----
+    def ocr(self, region=None, scale: int = 1) -> List[Dict[str, Any]]:
+        """nemu 截图 + WinRT OCR → [{text, x, y, w, h, cx, cy}…]。
+
+        坐标=设备像素（截图 1080x1920 与 nemu tap 同一坐标系）。region 裁剪 +
+        scale 放大可救小字/高亮背景格子（WinRT 对低对比小格会整格漏识别）。
+        stdout 编码不可靠，ocr.ps1 把 JSON 落文件（utf-8），这里读文件。"""
+        import json as _json
+        import subprocess
+        n = self.nemu
+        if not n:
+            raise RuntimeError("nemu 截图不可用（OCR 依赖像素层）")
+        self.shots_dir.mkdir(parents=True, exist_ok=True)
+        img = n.capture()
+        if region:
+            img = img.crop(region)
+        if scale > 1:
+            from PIL import Image
+            img = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
+        png = self.shots_dir / "_ocr_tmp.png"
+        img.save(png)
+        ocr_ps1 = Path(__file__).resolve().parent.parent / "tools" / "ocr.ps1"
+        subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+             str(ocr_ps1), str(png)],
+            capture_output=True, timeout=40)
+        raw = (self.shots_dir / "_ocr_tmp.png.ocr.json").read_text("utf-8-sig").strip()
+        if not raw or raw == "[]":
+            return []
+        data = _json.loads(raw)
+        ox, oy = (region[0], region[1]) if region else (0, 0)
+        for d in data:
+            d["x"] = ox + d["x"] // scale
+            d["y"] = oy + d["y"] // scale
+            d["w"] = d["w"] // scale
+            d["h"] = d["h"] // scale
+            d["cx"] = d["x"] + d["w"] // 2
+            d["cy"] = d["y"] + d["h"] // 2
+        return data
+
+    def ocr_texts(self, region=None) -> List[str]:
+        return [_norm(d["text"]) for d in self.ocr(region)]
+
+    def ocr_find(self, text: str) -> Optional[Tuple[int, int]]:
+        """按文本找 OCR 行中心：归一化后先精确匹配，无则包含匹配取最短行
+        （"查询"不能命中"仅查询"这种长行）。"""
+        t = _norm(text)
+        data = self.ocr()
+        hits = [d for d in data if _norm(d["text"]) == t]
+        if not hits:
+            hits = sorted((d for d in data if t in _norm(d["text"])),
+                          key=lambda d: len(_norm(d["text"])))
+        return (hits[0]["cx"], hits[0]["cy"]) if hits else None
+
+    def ocr_tap(self, text: str, settle: float = 1.5, dy: int = 0,
+                dx: int = 0) -> bool:
+        """点 OCR 文本行中心；dy/dx 偏移用于点文本上方/旁边的真实触控目标
+        （如首页菜单的图标在标签上方 ~110px，标签本身不响应点击）。"""
+        pos = self.ocr_find(text)
+        if not pos:
+            return False
+        self.tap(pos[0] + dx, pos[1] + dy)
+        time.sleep(settle)
+        return True
+
+    def screen_state(self) -> str:
+        """按像素判前台页（DOM 分不清覆盖页；OCR 文本特征从具体到一般）。"""
+        s = "".join(self.ocr_texts())
+        if any(_norm(h) in s for h in LOGIN_HINTS):
+            return "login"
+        if "热门城市" in s:
+            return "city"
+        if "选择日期" in s:
+            return "calendar"
+        if "出差申请" in s and "仅查询" in s:
+            return "apply-overlay"
+        if "查询" in s and ("请选择城市" in s or "关键字" in s):
+            return "search"
+        if "酒店预订" in s and ("机票预订" in s or "火车预订" in s):
+            return "home"
+        if "¥" in s or "￥" in s or "起" in s:
+            return "list"
+        return "other"
+
 
 class HertzApp(RpaClient):
     """赫兹商旅查价流程（流程节点按登录后界面逐步校准）。"""
@@ -317,126 +445,206 @@ class HertzApp(RpaClient):
             break
         return False
 
-    def _at_page(self, frag: str) -> bool:
-        return any(frag in (t or "") for t in self.texts() if (t or "").startswith("pages/"))
+    def _fg_scope(self):
+        """（前台页名, 前台页节点）。Weex 页面栈叠加在 dump 里=多份 pages/* 节点，
+        **文档序最后一层**才是前台；返回栈里的同名旧页会造成误判。"""
+        root = self.dump()
+        last = None
+        for n in root.iter("node"):
+            t = (n.attrib.get("text") or "").strip()
+            if t.startswith("pages/"):
+                m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
+                if m and int(m.group(3)) > int(m.group(1)):
+                    last = (t, n)
+        return last if last else ("", root)
 
-    def ensure_search_ready(self, timeout_s: int = 20) -> bool:
-        """搜索页就绪：无弹层遮挡（出差申请弹层/城市浮层），字段+查询按钮可用。"""
-        import time as _t
-        deadline = _t.time() + timeout_s
-        while _t.time() < deadline:
-            ts = self.texts()
-            has_query = any(t == "查询" for t in ts)
-            has_field = any(t == "请选择城市" for t in ts) or any(
-                t == "酒店名/工作圈/关键字" or t == "酒店名/商圈/关键字" for t in ts)
-            overlay = any(t == "选择出差申请" or t == "出差申请" for t in ts) and not has_query
-            city_open = any(t == "热门城市" for t in ts)
-            if has_query and has_field and not overlay and not city_open:
+    def _fg_page_name(self) -> str:
+        return self._fg_scope()[0]
+
+    def _at_page(self, frag: str) -> bool:
+        return frag in self._fg_page_name()
+
+    def ensure_search_ready(self, timeout_s: int = 30) -> bool:
+        """搜索页就绪：像素判定无弹层遮挡（出差申请弹层/城市浮层）。"""
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            st = self.screen_state()
+            if st == "search":
                 return True
-            if overlay or "仅查询" in ts:
-                self.tap_text("仅查询", settle=1.2)
+            if st == "apply-overlay":
+                self.ocr_tap("仅查询", settle=1.5)   # 出差申请弹层的跳过钮
                 continue
-            if city_open:
-                self.back(); _t.sleep(1.2)
+            if st == "city":
+                self.back(); time.sleep(1.2)
                 continue
-            _t.sleep(1)
+            if st == "other" and "出差申请" in "".join(self.ocr_texts()):
+                # 弹层在但"仅查询"没露出（折叠/半屏）→ 点一次，不行滚一下再点
+                if not self.ocr_tap("仅查询", settle=1.5):
+                    self.dev.shell("input swipe 540 1300 540 1000 300")
+                    time.sleep(1)
+                continue
+            time.sleep(1)
         return False
 
     def _goto_hotel_search(self) -> bool:
-        """确保停在 book-hotel 搜索页（从首页进入；处理'仅查询'弹层）。"""
+        """确保停在酒店搜索页（像素判定；从首页进入；处理'仅查询'弹层）。"""
         for _ in range(4):
-            if self._at_page("book-hotel/book-hotel"):
-                self.tap_text("仅查询", settle=1.5)   # 关掉申请单弹层（无则忽略）
+            st = self.screen_state()
+            if st == "search":
                 return True
-            self.dev.shell("input swipe 540 700 540 1500 300")   # 复位滚动到顶部（下拉）
-            time.sleep(1)
+            if st == "apply-overlay":
+                self.ocr_tap("仅查询", settle=2.0)
+                continue
+            if st in ("city", "calendar"):
+                self.back(); time.sleep(1.2)
+                continue
+            # home / other：点"酒店预订"**图标**（真实触控目标=标签上方 ~110px
+            # 的 147x147 图标 TextView，标签本身不响应）；**不要先下拉复位**
+            # （冷启后下拉会触发首页刷新动画，吃掉后续点击）。
+            if self.ocr_tap("酒店预订", settle=4, dy=-110):
+                time.sleep(1)
+                continue
+            self.dev.shell("input swipe 540 700 540 1500 300")
+            time.sleep(1.2)
             self._tap_text_container("酒店预订", settle=4)
-            time.sleep(2)
-        return self._at_page("book-hotel/book-hotel")
+        return self.screen_state() == "search"
+
+    def wait_state(self, target: str, timeout_s: float = 18,
+                   poll: float = 1.2) -> str:
+        """等屏幕进入目标状态；中途自动清"出差申请"弹层（它在流程里会反复
+        弹出：进搜索页、点城市字段、点日期字段后都可能再弹）。"""
+        deadline = time.time() + timeout_s
+        st = self.screen_state()
+        while st != target and time.time() < deadline:
+            if st == "apply-overlay":
+                self.ocr_tap("仅查询", settle=2.0)
+            else:
+                time.sleep(poll)
+            st = self.screen_state()
+        return st
+
+    def _city_field_ocr(self) -> Optional[Tuple[str, int, int]]:
+        """搜索页城市字段的（归一化文本, cx, cy）：OCR 行里 y 560~760、左半屏
+        的普通文本（排除右侧"当前位置"提示）。新会话默认=定位城市（实测鞍山）。"""
+        for d in self.ocr():
+            t = _norm(d["text"])
+            if 560 < d["cy"] < 760 and d["cx"] < 640 and t \
+                    and "位置" not in t and t not in ("当前位置",):
+                return (t, d["cx"], d["cy"])
+        return None
 
     def _select_city(self, city: str) -> bool:
-        for attempt in range(2):
-            # 城市字段：直点文本或点容器双保险
-            if not self.tap_text("请选择城市", settle=5):
-                self._tap_text_container("请选择城市", settle=6)
-            # 轮询等城市页渲染（H5 慢，实测 5-8s）
-            ts = []
-            for _ in range(8):
-                time.sleep(1.2)
-                ts = self.texts()
-                if any(t == "热门城市" for t in ts):
-                    break
-            if any(t == city for t in ts) and any(t == "热门城市" for t in ts):
-                if self.tap_text(city, settle=3):
-                    time.sleep(1)
-                    if not any(t == "热门城市" for t in self.texts()):
-                        return True   # 城市页已关=选择成功
-            elif not any(t == "请选择城市" for t in self.texts()) and any(
-                    (t or "").strip() == city for t in self.texts()):
-                return True           # 字段已是目标城市
+        """选城市（像素闭环 + dump 兜底）：点字段开城市页 → 点城市 → OCR 复核字段。
+
+        城市格子里有 OCR 硬盲区（部分格子样式导致整格漏识别，实测杭州），
+        OCR 找不到时用 dump 同名节点按 y 最靠上兜底——背景搜索页"历史记录"
+        的同名节点在最底部（y>1400）被 y 范围排掉，误点由字段级验证兜住。"""
+        city_n = _norm(city)
+        for attempt in range(3):
+            field = self._city_field_ocr()
+            if field and field[0] == city_n:
+                return True                       # 字段已是目标城市
+            if self.screen_state() != "city":
+                if field:
+                    self.tap(field[1], field[2])  # 点字段本身开城市页
+                else:
+                    self.ocr_tap("请选择城市", settle=5)
+            # 等城市页（H5 慢 5-8s；点字段可能再次触发申请单弹层，wait_state 会清）
+            st = self.wait_state("city", timeout_s=18)
+            if st != "city":
+                self.back(); time.sleep(1.5)
+                continue
+            time.sleep(2.0)   # H5 出标题后仍在重排，点早一拍=点到错位内容
+            pos = self.ocr_find(city)
+            if not pos:
+                cands = []
+                for n in self.dump().iter("node"):
+                    if (n.attrib.get("text") or "").strip() == city:
+                        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                                     n.attrib.get("bounds") or "")
+                        if m:
+                            x1, y1, x2, y2 = map(int, m.groups())
+                            cy = (y1 + y2) // 2
+                            if x2 > x1 and 300 < cy < 1400:
+                                cands.append(((x1 + x2) // 2, cy))
+                pos = min(cands, key=lambda p: p[1]) if cands else None
+            if pos:
+                self.tap(*pos)
+                time.sleep(3)
+                field = self._city_field_ocr()
+                if field and field[0] == city_n:
+                    return True                   # 字段已变=真成功
             self.back(); time.sleep(1.5)
         return False
 
     def _select_dates(self, checkin: str, checkout: str) -> bool:
-        """checkin/checkout: YYYY-MM-DD。日历多月滚动式，格子=节日+日+标记。"""
+        """选日期（像素开合验证 + dump 格子定位）。
+
+        日历=多月连滚（手风琴+虚拟化），格子文本"节日+日"或"日+标记"
+        （如"国庆节1"/"30入住"），选入住→选离店自动关闭，无确认按钮。"""
         import datetime as dt
         ci = dt.date.fromisoformat(checkin)
         co = dt.date.fromisoformat(checkout)
-        # 开日历：已开着就不点（再点会 toggle 关掉）
-        if not any(t == "选择日期" for t in self.texts()):
-            opened = False
-            for n in self.dump().iter("node"):
-                t = (n.attrib.get("text") or "").strip()
-                if re.match(r"^\d{2}月\d{2}日$", t):
-                    pos = _center(n.attrib.get("bounds") or "")
-                    if pos != (0, 0):
-                        self.tap(*pos); time.sleep(3); opened = True
-                        break
-            if not opened and not self.tap_text("今天", settle=3):
-                return False
-            if not any(t == "选择日期" for t in self.texts()):
-                return False
-        ym = f"{ci.year}年{ci.month}月"
-        self._current_ym = ym
-        root = self.dump()
-        # 双向滚动：目标月标题进 200~1100（其下格子才在屏内）；未渲染时按可见月份判方向
-        for i in range(12):
-            y = self._text_y(root, ym)
-            if y is not None and 200 < y < 1100:
-                break
-            if not y or y == 0:
-                vis = []
-                for n in root.iter("node"):
-                    tt = (n.attrib.get("text") or "").strip()
-                    if re.match(r"^20\d{2}年\d{1,2}月$", tt):
-                        yy = self._text_y(root, tt)
-                        if yy and yy > 0:
-                            vis.append((yy, tt))
-                if not vis:
+        want_ci = "%02d月%02d日" % (ci.month, ci.day)   # 日期栏格式带前导零
+        want_co = "%02d月%02d日" % (co.month, co.day)
+        if self._date_row_ok(want_ci, want_co):
+            return True                            # 日期栏已是目标
+        # 开日历：已开着不能再点日期字段（toggle 会关掉）
+        if self.screen_state() != "calendar":
+            hit = None
+            for d in self.ocr():
+                t = _norm(d["text"])
+                if re.fullmatch(r"\d{1,2}月\d{1,2}日", t) and d["cx"] < 420:
+                    hit = (d["cx"], d["cy"])       # 入住侧日期字段
+                    break
+            if not hit:
+                p = self.ocr_find("今天")          # 兜底：点"今天"标签左侧
+                if not p:
                     return False
-                vis.sort()
-                # 可见月都在屏幕中下部 → 目标月在上方 → 下拉；反之亦然
-                if vis[0][0] > 500:
-                    self.dev.shell("input swipe 540 900 540 1500 350")
-                else:
-                    self.dev.shell("input swipe 540 1500 540 900 350")
-            elif y >= 1100:
-                self.dev.shell("input swipe 540 1400 540 1000 300")
-            else:
-                self.dev.shell("input swipe 540 1000 540 1400 300")
-            time.sleep(1.0)
+                hit = (p[0] - 80, p[1])
+            self.tap(*hit)
+            time.sleep(2.5)
+        # 点日期字段也可能再弹申请单，wait_state 自动清
+        if self.wait_state("calendar", timeout_s=15) != "calendar":
+            return False
+        # 先入住后离店；今天默认已标"入住"，重选即覆盖
+        if not self._tap_calendar_day(ci):
+            return False
+        time.sleep(1.2)
+        if not self._tap_calendar_day(co):
+            return False
+        time.sleep(1.5)
+        if self._date_row_ok(want_ci, want_co):
+            return True
+        # 没自动关：可能离店日没点上，补一次
+        if self.screen_state() == "calendar" and self._tap_calendar_day(co):
+            time.sleep(1.5)
+        return self._date_row_ok(want_ci, want_co)
+
+    def _date_row_ok(self, want_ci: str, want_co: str) -> bool:
+        s = "".join(self.ocr_texts())
+        return want_ci in s and want_co in s
+
+    def _tap_calendar_day(self, d) -> bool:
+        """滚动到目标日所在月（标题 y 500~1400），dump 找格子（月标题 y 之下
+        的唯一文本模式）点击。"""
+        import datetime as _dt
+        if not isinstance(d, _dt.date):
+            d = _dt.date.fromisoformat(str(d))
+        ym = f"{d.year}年{d.month}月"
+        for attempt in range(10):
             root = self.dump()
-        else:
-            return False
-        y_end = self._text_y(root, f"{co.year}年{co.month}月") or 99999
-        self._current_ym = ym
-        if not self._tap_day_in(root, ci.day, y, y_end):
-            return False
-        time.sleep(1)
-        root2 = self.dump()
-        y2 = self._text_y(root2, ym) or y
-        y2_end = self._text_y(root2, f"{co.year}年{co.month}月") or 99999
-        return self._tap_day_in(root2, co.day, y2, y2_end)
+            y_top = self._text_y(root, ym)
+            if y_top is None or y_top == 0 or y_top > 1400 or y_top < 300:
+                # 目标月不在手：按渲染中的最近月判方向滚动
+                self.dev.shell(self._calendar_swipe_cmd(root, ym))
+                time.sleep(1.0)
+                continue
+            if self._tap_day_between(root, d.day, y_top, 99999):
+                return True
+            self.dev.shell("input swipe 540 1500 540 1000 300")   # 标题可见但格子屏外→上滚
+            time.sleep(1.0)
+        return False
 
     def _text_y(self, root, txt: str):
         for n in root.iter("node"):
@@ -446,29 +654,20 @@ class HertzApp(RpaClient):
                     return (int(m.group(2)) + int(m.group(4))) // 2
         return None
 
-    def _tap_day_in(self, root, day: int, y_top: int, y_bottom: int) -> bool:
-        """格子文本=节日+日+标记；必须格子本身在屏内才可点，屏外则小步滚动。"""
-        pat = re.compile(r"^(?:[\u4e00-\u9fa5]{0,4})?" + str(day) + r"(?:入住|离店|在店)?$")
-        for attempt in range(12):
-            hit_offscreen = False
-            for n in root.iter("node"):
-                t = (n.attrib.get("text") or "").strip()
-                m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
-                if t and m and pat.match(t) and n.attrib.get("clickable") == "true":
-                    cy = (int(m.group(2)) + int(m.group(4))) // 2
-                    if y_top < cy < y_bottom and 0 < cy < 1780:
-                        x = (int(m.group(1)) + int(m.group(3))) // 2
-                        self.tap(x, cy)
-                        return True
-                    hit_offscreen = True   # 找到格子但屏外/未渲染
-                    break
-            if not hit_offscreen:
-                return False              # 连格子都没有（月份不对）
-            # 方向：按渲染中的最近月份判断目标月在上方（下拉）还是下方（上滚）
-            self.dev.shell(self._calendar_swipe_cmd(root, getattr(self, "_current_ym", "")))
-            time.sleep(1.0)
-            root = self.dump()
-            y_top = self._text_y(root, getattr(self, "_current_ym", "")) or y_top
+    def _tap_day_between(self, root, day: int, y_top: int, y_bottom: int) -> bool:
+        """在 [y_top, y_bottom) 带内找日格点击。格子文本="节日+日"或"日+标记"
+        （如"国庆节1"/"30入住"）；格子本身必须 clickable 且完整在屏内。"""
+        pat = re.compile(r"^(?:[\u4e00-\u9fa5]{0,4})?" + str(day) +
+                         r"(?:入住|离店|在店)?$")
+        for n in root.iter("node"):
+            t = (n.attrib.get("text") or "").strip()
+            m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", n.attrib.get("bounds") or "")
+            if t and m and pat.fullmatch(t) and n.attrib.get("clickable") == "true":
+                x1, y1, x2, y2 = map(int, m.groups())
+                cy = (y1 + y2) // 2
+                if y_top < cy < y_bottom and 150 < cy < 1780:
+                    self.tap((x1 + x2) // 2, cy)
+                    return True
         return False
 
     @staticmethod
@@ -492,75 +691,92 @@ class HertzApp(RpaClient):
         return "input swipe 540 1500 540 800 350"            # 默认上滚
 
     def _read_hotel_list(self) -> List[Dict[str, Any]]:
-        """读列表页价格行（滚动合并）；名称与价格按序配对。"""
+        """读列表页价格行（OCR 像素层，滚动合并）；酒店名与其后出现的价格按
+        阅读序配对。"""
         out: Dict[str, Dict[str, Any]] = {}
-        all_texts: List[str] = []
-        for _ in range(3):
-            ts = self.texts()
-            all_texts.extend(ts)
-            for t in ts:
-                t = (t or "").strip()
+        cur_name: Optional[str] = None
+        for _ in range(4):
+            for d in sorted(self.ocr(), key=lambda d: (d["cy"], d["cx"])):
+                t = _norm(d["text"])
                 pm = re.search(r"[¥￥]\s*([0-9][0-9,]*\.?[0-9]*)\s*起", t)
-                if pm and t not in out:
-                    out[t] = {"price_text": t,
-                              "price": round(float(pm.group(1).replace(",", "")))}
+                if pm:
+                    key = cur_name or t
+                    if key not in out:
+                        out[key] = {"price_text": d["text"], "name": cur_name,
+                                    "price": round(float(pm.group(1).replace(",", "")))}
+                elif 4 < len(t) < 30 and any(k in t for k in ("酒店", "公寓", "宾馆")) \
+                        and "关键字" not in t and "协议" not in t and "差标" not in t:
+                    cur_name = t
             self.dev.shell("input swipe 540 1500 540 700 300")
             time.sleep(1.5)
-        items = list(out.values())
-        names = [t for t in all_texts
-                 if t and ("酒店" in t or "公寓" in t) and 4 < len(t) < 30
-                 and "关键字" not in t and "协议" not in t]
-        for i, name in enumerate(dict.fromkeys(names)):
-            if i < len(items):
-                items[i]["name"] = name
-        return items
+        return list(out.values())
+
+    def cold_launch(self, pkg: str = HERTZ_PACKAGE, wait_s: int = 30) -> bool:
+        """force-stop 冷启动 + 等首页就绪。
+
+        App 渲染层在长时间 RPA 操控后会崩成纯灰屏（DOM 树完好、点击全静默
+        失效），冷启动是唯一恢复手段——每轮 probe 前必须执行。"""
+        self.dev.shell(f"am force-stop {pkg}")
+        time.sleep(2)
+        self.dev.shell(f"am start -n {HERTZ_MAIN}")
+        deadline = time.time() + wait_s
+        while time.time() < deadline:
+            time.sleep(2)
+            if "index-travel" in self._fg_page_name():
+                return True
+        return False
 
     def probe(self, hotel: str = "", checkin: str = "", checkout: str = "",
               nights: int = 1, city: str = "杭州") -> Dict[str, Any]:
-        """完整查价流程：登录检测→搜索页→城市→日期→查询→协议价列表。"""
+        """完整查价流程：冷启动→登录检测→搜索页→城市→日期→查询→协议价列表。"""
         base = {"source": "app", "package": HERTZ_PACKAGE}
         try:
-            self.launch()
+            self.cold_launch()
         except Exception as e:  # noqa: BLE001
             return {**base, "ok": False, "reason": f"模拟器不可用: {str(e)[:120]}"}
-        time.sleep(3)
-        need = self._require_login(self.texts())
+        need = self._require_login([v[0] for v in self.fg_visible_nodes()])
         if need:
             return need
-        # 状态归位：连 back 回首页根（消除上轮残留浮层/子页）
-        for _ in range(5):
-            if self._at_page("index-travel") and not any(
-                    t in ("历史记录", "选择日期") for t in self.texts()):
-                break
-            self.back(); time.sleep(1.2)
         if not self._goto_hotel_search():
             return {**base, "ok": False, "reason": "未能进入酒店搜索页（App 改版或卡顿）"}
         if not self.ensure_search_ready():
             return {**base, "ok": False, "reason": "搜索页被弹层占用且无法清理（出差申请/城市浮层）"}
         # 清理遮挡浮层（历史记录/日历）
         for _ in range(2):
-            ts = self.texts()
-            if any(t in ("历史记录", "选择日期") for t in ts):
+            names = [v[0] for v in self.fg_visible_nodes()]
+            if any(t in ("历史记录", "选择日期") for t in names):
                 self.back(); time.sleep(1.5)
             else:
                 break
-        # 城市字段已显示目标城市才跳过（历史记录里出现城市名不算）
-        field_is_city = (not any(t == "请选择城市" for t in self.texts())
-                         and any((t or "").strip() == city for t in self.texts()))
+        # 城市字段已显示目标城市才跳过（像素级字段判定）
+        _f = self._city_field_ocr()
+        field_is_city = bool(_f and _f[0] == _norm(city))
         if not field_is_city and not self._select_city(city):
             return {**base, "ok": False, "reason": f"城市选择失败: {city}（支持热门城市直点，其他待字母索引校准）"}
         if checkin and checkout:
-            import re as _re9
-            cur = [t.strip() for t in self.texts() if t and _re9.match(r"^[0-9]{1,2}月[0-9]{2}日$", t.strip())]
             want_ci = "%02d月%02d日" % (int(checkin[5:7]), int(checkin[8:10]))
             want_co = "%02d月%02d日" % (int(checkout[5:7]), int(checkout[8:10]))
-            if want_ci in cur and want_co in cur:
-                pass   # 日期已是目标
-            elif not self._select_dates(checkin, checkout):
-                return {**base, "ok": False, "reason": f"日期选择失败: {checkin}~{checkout}"}
-        if not self.tap_text("查询", settle=8):
-            return {**base, "ok": False, "reason": "查询按钮未找到"}
-        time.sleep(3)
+            if not self._date_row_ok(want_ci, want_co):
+                if not self._select_dates(checkin, checkout):
+                    return {**base, "ok": False, "reason": f"日期选择失败: {checkin}~{checkout}"}
+        # 查询→列表（点查询也可能再弹申请单弹层，逐状态推进）
+        at_list = False
+        for _ in range(4):
+            st = self.screen_state()
+            if st == "list":
+                at_list = True
+                break
+            if st == "apply-overlay":
+                self.ocr_tap("仅查询", settle=2.0)
+                continue
+            if st == "search":
+                if not self.ocr_tap("查询", settle=6):
+                    time.sleep(1.5)
+                continue
+            time.sleep(1.5)
+        if not at_list:
+            return {**base, "ok": False, "reason": f"未进入价格列表页（state={st}）"}
+        time.sleep(2)
         items = self._read_hotel_list()
         matched = [i for i in items if hotel[:2] in (i.get("name") or "")] if hotel else []
         target = matched[0] if matched else None
