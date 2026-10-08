@@ -430,6 +430,18 @@ def build_app(daemon: Daemon) -> web.Application:
         from .ota_app import app_state
         return _json(await asyncio.get_event_loop().run_in_executor(None, app_state))
 
+    async def hotel_install_mumu(_req):
+        from . import hotel_setup
+        return _json(hotel_setup.start_install("mumu"))
+
+    async def hotel_install_app(_req):
+        from . import hotel_setup
+        return _json(hotel_setup.start_install("app"))
+
+    async def hotel_setup_status(_req):
+        from . import hotel_setup
+        return _json(hotel_setup.setup_status())
+
     async def hotel_groups(_req):
         from .ota import _HOTEL_GROUPS, match_hotel_group
         q = dict(_req.query)
@@ -525,6 +537,9 @@ def build_app(daemon: Daemon) -> web.Application:
     app.router.add_post("/api/hotel/browser", hotel_browser)
     app.router.add_get("/api/hotel/groups", hotel_groups)
     app.router.add_get("/api/hotel/app-state", hotel_app_state)
+    app.router.add_post("/api/hotel/install-mumu", hotel_install_mumu)
+    app.router.add_post("/api/hotel/install-app", hotel_install_app)
+    app.router.add_get("/api/hotel/setup-status", hotel_setup_status)
     app.router.add_get("/api/conversations", conversations)
     app.router.add_post("/api/conversations/{chat}/read", conversation_read)
     app.router.add_get("/api/hotel/quote-status", hotel_quote_status)

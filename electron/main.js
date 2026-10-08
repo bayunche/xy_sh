@@ -74,7 +74,14 @@ function walk(dir, fn) {
   }
 }
 
-// ── Python venv ─────────────────────────────────────────────────────
+// ── Python venv（uv 自动安装 + 国内源优先，失败回退官方源）──────────
+const HOME_DIR = process.env.HOME || process.env.USERPROFILE;
+const CN_MIRRORS = {
+  uvBin: "https://ghproxy.net/https://github.com/astral-sh/uv/releases/latest/download",
+  pypi: "https://mirrors.aliyun.com/pypi/simple/",
+  python: "https://ghproxy.net/https://github.com/astral-sh/python-build-standalone/releases/download",
+};
+
 function venvPython() {
   const p = IS_WIN
     ? path.join(APP_ROOT, "gate", ".venv", "Scripts", "python.exe")
@@ -82,34 +89,99 @@ function venvPython() {
   return fs.existsSync(p) ? p : null;
 }
 
-function ensureVenv(log) {
-  const existing = venvPython();
-  if (existing) return existing;
-  const gateDir = path.join(APP_ROOT, "gate");
-  const attempts = [
-    ["uv", () => execSync("uv sync", { cwd: gateDir, stdio: "pipe", windowsHide: true })],
-    ["python", () => {
-      const pyBin = IS_WIN ? "python" : "python3";
-      execSync(`${pyBin} -m venv .venv`, { cwd: gateDir, stdio: "pipe", windowsHide: true });
-      const pip = IS_WIN
-        ? path.join(gateDir, ".venv", "Scripts", "pip.exe")
-        : path.join(gateDir, ".venv", "bin", "pip");
-      execSync(`"${pip}" install -e .`, { cwd: gateDir, stdio: "pipe", windowsHide: true });
-    }],
-  ];
-  for (const [name, fn] of attempts) {
-    try { fn(); } catch (e) { log(`[env] 用 ${name} 建环境失败: ${String(e).slice(0, 140)}`); continue; }
-    const py = venvPython();
-    if (py) return py;
+// spawn 异步跑命令并收集输出（execSync 会卡死主进程，首启下载几分钟不可接受）
+function run(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    let p;
+    try {
+      p = spawn(cmd, args, Object.assign(
+        { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }, opts));
+    } catch (e) {
+      resolve({ code: -1, out: String(e) });
+      return;
+    }
+    let out = "";
+    const timer = setTimeout(() => { try { p.kill(); } catch {} },
+      opts.timeout || 10 * 60 * 1000);
+    p.stdout.on("data", (d) => { out += d; });
+    p.stderr.on("data", (d) => { out += d; });
+    p.on("error", (e) => { clearTimeout(timer); resolve({ code: -1, out: out + String(e) }); });
+    p.on("close", (code) => { clearTimeout(timer); resolve({ code, out }); });
+  });
+}
+
+function findUv() {
+  const r = require("child_process").spawnSync(
+    IS_WIN ? "where" : "which", ["uv"], { encoding: "utf8" });
+  if (r.status === 0 && r.stdout.trim()) return r.stdout.trim().split(/\r?\n/)[0];
+  for (const dir of [".local/bin", ".cargo/bin"]) {
+    const f = path.join(HOME_DIR, dir, IS_WIN ? "uv.exe" : "uv");
+    if (fs.existsSync(f)) return f;
   }
   return null;
 }
 
+async function installUv(log) {
+  const attempts = [["国内镜像", CN_MIRRORS.uvBin], ["官方源", ""]];
+  for (const [name, dlUrl] of attempts) {
+    log(`[env] 未找到 uv，自动安装（${name}）…`);
+    let r;
+    if (IS_WIN) {
+      const ps = dlUrl
+        ? `$env:UV_DOWNLOAD_URL='${dlUrl}'; irm https://astral.sh/uv/install.ps1 | iex`
+        : `irm https://astral.sh/uv/install.ps1 | iex`;
+      r = await run("powershell",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps], { timeout: 300000 });
+    } else {
+      const script = dlUrl
+        ? `export UV_DOWNLOAD_URL="${dlUrl}"; curl -LsSf https://astral.sh/uv/install.sh | sh`
+        : `curl -LsSf https://astral.sh/uv/install.sh | sh`;
+      r = await run("sh", ["-c", script], { timeout: 300000 });
+    }
+    const uv = findUv();
+    if (uv) return uv;
+    log(`[env] uv 安装（${name}）失败: ${(r.out || "").trim().split(/\r?\n/).slice(-2).join(" ").slice(0, 160)}`);
+  }
+  return null;
+}
+
+async function ensureVenv(log) {
+  const existing = venvPython();
+  if (existing) return existing;
+  const gateDir = path.join(APP_ROOT, "gate");
+  let uv = findUv() || await installUv(log);
+  if (uv) {
+    for (const [name, extra] of [
+      ["国内源", { UV_DEFAULT_INDEX: CN_MIRRORS.pypi, UV_INDEX_URL: CN_MIRRORS.pypi,
+                   UV_PYTHON_INSTALL_MIRROR: CN_MIRRORS.python }],
+      ["官方源", {}],
+    ]) {
+      log(`[env] uv sync（${name}）… 首次需下载 Python 与依赖，可能几分钟`);
+      const r = await run(uv, ["sync"], { cwd: gateDir, env: Object.assign({}, process.env, extra) });
+      const tail = (r.out || "").trim().split(/\r?\n/).filter(Boolean).slice(-3).join(" | ");
+      if (tail) log(`[env] ${tail.slice(0, 300)}`);
+      const py = venvPython();
+      if (r.code === 0 && py) return py;
+      log(`[env] uv sync（${name}）失败 code=${r.code}`);
+    }
+  }
+  // 最后兜底：系统 python 直接建 venv（非 editable——旧 pip 不支持 PEP 660）
+  const pyBin = IS_WIN ? "python" : "python3";
+  log(`[env] uv 不可用，尝试 ${pyBin} -m venv 兜底…`);
+  await run(pyBin, ["-m", "venv", ".venv"], { cwd: gateDir, timeout: 300000 });
+  const pip = IS_WIN ? path.join(gateDir, ".venv", "Scripts", "pip.exe")
+    : path.join(gateDir, ".venv", "bin", "pip");
+  let r = await run(pip, ["install", ".", "-i", CN_MIRRORS.pypi],
+    { cwd: gateDir, timeout: 15 * 60 * 1000 });
+  if (r.code !== 0) r = await run(pip, ["install", "."], { cwd: gateDir, timeout: 15 * 60 * 1000 });
+  return venvPython();
+}
+
 // ── xy-gate sidecar ─────────────────────────────────────────────────
-function startDaemon(log) {
-  const py = ensureVenv(log);
+async function startDaemon(log) {
+  const py = await ensureVenv(log);
   if (!py) {
-    log("[env] 未找到 Python 3.10+ 或 uv。请安装后重开本应用。");
+    log("[env] 环境创建失败（uv 自动安装与 python 兜底都没成）。请检查网络后重开本应用。");
     return null;
   }
   const dshScript = path.join(RES, "dsh", "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
@@ -179,8 +251,9 @@ if (!gotLock) {
     };
 
     await win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(bootPage()));
-    startDaemon(log);
-    const ok = await waitHealthy();
+    const hadVenv = !!venvPython();
+    await startDaemon(log);
+    const ok = await waitHealthy(hadVenv ? 120000 : 15 * 60 * 1000);
     if (!ok) {
       win.webContents.executeJavaScript(
         `document.getElementById('s').textContent = ${JSON.stringify(
@@ -208,7 +281,7 @@ border-radius:50%;margin:0 auto 18px;animation:r 1s linear infinite}
 pre{white-space:pre-wrap;text-align:left;max-width:680px;max-height:200px;overflow:auto;
 font-size:11px;color:#94a3b8;margin-top:16px}
 </style></head><body><div class="c"><div class="spin"></div>
-<div id="s">正在启动机器人（首次运行需创建 Python 环境，可能需要几分钟）…</div>
+<div id="s">正在启动机器人（首次运行会自动安装 uv 并用国内源拉取 Python 环境与依赖，可能需要几分钟）…</div>
 <pre id="lg"></pre></div>
 <script>window.__xylog=function(ls){document.getElementById('lg').textContent=ls.join("\\n")}</script>
 </body></html>`;

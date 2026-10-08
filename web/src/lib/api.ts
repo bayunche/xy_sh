@@ -51,3 +51,6 @@ export const postHotelCost = (hotel: string, price?: number) =>
   api("/api/hotel/cost", { method: "POST", body: JSON.stringify({ hotel, price }) });
 
 export const getHotelAppState = () => api("/api/hotel/app-state");
+export const postInstallMumu = () => api("/api/hotel/install-mumu", { method: "POST", body: "{}" });
+export const postInstallApp = () => api("/api/hotel/install-app", { method: "POST", body: "{}" });
+export const getSetupStatus = () => api("/api/hotel/setup-status");

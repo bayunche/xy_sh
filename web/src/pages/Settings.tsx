@@ -6,8 +6,8 @@ import { Input, Textarea, Select, Label } from "@/components/ui/input";
 import { Field } from "@/components/ui/misc";
 import { Switch } from "@/components/ui/switch";
 import { Spinner, ErrorText } from "@/components/ui/misc";
-import { getSettings, putSettings, getDshKey, putDshKey, getAccount, putAccount, captureStart, captureStatus, captureStop, postHotelCost, getHotelAppState } from "@/lib/api";
-import { Save, KeyRound, Cookie, Plus, Trash2, ScanLine, Hotel, Smartphone } from "lucide-react";
+import { getSettings, putSettings, getDshKey, putDshKey, getAccount, putAccount, captureStart, captureStatus, captureStop, postHotelCost, getHotelAppState, postInstallMumu, postInstallApp, getSetupStatus } from "@/lib/api";
+import { Save, KeyRound, Cookie, Plus, Trash2, ScanLine, Hotel, Smartphone, Download } from "lucide-react";
 
 function Section({ title, desc, children }: { title: string; desc?: string; children: React.ReactNode }) {
   return (
@@ -33,6 +33,21 @@ export default function Settings() {
   const [hcostMsg, setHcostMsg] = React.useState("");
   const [appState, setAppState] = React.useState<any>(null);
   const [appChecking, setAppChecking] = React.useState(false);
+  const [setup, setSetup] = React.useState<any>(null);
+  const kickInstall = async (what: "mumu" | "app") => {
+    const r: any = what === "mumu" ? await postInstallMumu() : await postInstallApp();
+    if (r.error) { setSetup({ ...setup, [what]: { state: "error", error: r.error } }); return; }
+    setSetup({ ...setup, [what]: { state: "resolving" } });
+  };
+  React.useEffect(() => {
+    const busy = setup && ["resolving", "downloading", "installing"]
+      .some((st) => Object.values(setup).some((x: any) => x?.state === st));
+    if (!busy) return;
+    const t = setInterval(async () => {
+      try { setSetup(await getSetupStatus()); } catch {}
+    }, 3000);
+    return () => clearInterval(t);
+  }, [setup]);
   const [acct, setAcct] = React.useState<any>(null);
   const [cookie, setCookie] = React.useState("");
   const [cookieMsg, setCookieMsg] = React.useState("");
@@ -361,11 +376,24 @@ export default function Settings() {
 
       <Section title="赫兹商旅 App（协议价真源）" desc="酒店代订第四源：模拟器里查南网协议价，命中时作为成本基准（优先于携程价）">
         <div className="rounded-lg border border-border bg-muted/40 p-3 space-y-1.5 text-xs text-mutedfg">
-          <p className="font-medium text-fg">首次使用需要（一次装好，长期有效）：</p>
-          <p>1. 安装 <a className="underline" href="https://mumu.163.com/" target="_blank" rel="noreferrer">MuMu 模拟器 12</a>（Windows；mac 用 MuMu Player Pro，ADB 端口同为 16384）；</p>
-          <p>2. 模拟器里安装「赫兹商旅」App 并<b>人工登录一次</b>（机器人不碰密码，登录态保留在模拟器里）；</p>
-          <p>3. 查价时保持 MuMu 开着（最小化可以，全程无需人工操作）。</p>
-          <p>每次查价约 1.5~2 分钟（含冷启动）；未配置不影响其他三个查价源。</p>
+          <p className="font-medium text-fg">首次使用（一次装好，长期有效）：点下方按钮一键装 MuMu → 一键装 App → 在模拟器里<b>人工登录一次</b> → 查价时保持 MuMu 开着（最小化可以）。Mac 全自动安装；Windows 会打开官网下载页。</p>
+          <p>ADB 端口默认 16384（可用环境变量 XY_APP_ADB 覆盖）；每次查价约 1.5~2 分钟（含冷启动）；未配置不影响其他三个查价源。</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="secondary" disabled={setup?.mumu?.state === "downloading" || setup?.mumu?.state === "installing" || setup?.mumu?.state === "resolving"}
+            onClick={() => kickInstall("mumu")}>
+            <Download size={14} /> 一键安装 MuMu 模拟器
+          </Button>
+          <Button size="sm" variant="secondary" disabled={setup?.app?.state === "downloading" || setup?.app?.state === "installing" || setup?.app?.state === "resolving"}
+            onClick={() => kickInstall("app")}>
+            <Download size={14} /> 一键安装赫兹商旅 App
+          </Button>
+          {(["mumu", "app"] as const).map((k) => {
+            const st = setup?.[k];
+            if (!st || st.state === "idle") return null;
+            const tone = st.state === "done" ? "success" : st.state === "error" ? "danger" : "info";
+            return <Badge key={k} tone={tone}>{k === "mumu" ? "MuMu" : "App"}：{st.state}{st.progress ? ` · ${st.progress}` : ""}{st.error ? ` · ${st.error}` : ""}</Badge>;
+          })}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" variant="outline" disabled={appChecking}

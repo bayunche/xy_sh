@@ -35,7 +35,9 @@
 ## 快速开始
 
 前置：Node + 全局 `@deepseek-ai/dsh`（`npm i -g @deepseek-ai/dsh`，
-已初始化 `dsh --profile headless` 会跑通即可）、Python ≥3.10 + [uv](https://docs.astral.sh/uv/)。
+已初始化 `dsh --profile headless` 会跑通即可）。**桌面版（Electron）首启会自动
+安装 uv 并用国内源（ghproxy/阿里云）拉取 Python 环境与依赖**，无需手动装
+Python；源码运行才需要 Python ≥3.10 + [uv](https://docs.astral.sh/uv/)。
 
 ```bash
 git clone <本仓库> && cd xy-dsh-robot
@@ -74,12 +76,15 @@ uv run --project gate xy-gate hotel-probe --source app --kw "亚朵" \
 
 **App 源前置条件（一次装好，长期有效）**：
 
-1. 装 [MuMu 模拟器 12](https://mumu.163.com/)（默认实例 0，ADB 端口 16384）；
-2. 在模拟器里安装「赫兹商旅」App 并**人工登录一次**（南网 SSO，登录态保留在
-   模拟器里，机器人不碰密码）；登录后若停在「因私出行」入口，走因公首页的
-   「酒店预订」即可（流程自动处理出差申请弹层）；
+1. 管理后台 **设置 → 赫兹商旅 App（协议价真源）**：点「一键安装 MuMu 模拟器」
+   （Mac 全自动：下载网易 CDN 直链装进 /Applications 并启动；Windows 打开官网
+   下载页）→ 点「一键安装赫兹商旅 App」（应用宝国内直链或本地 APK，自动 adb
+   安装并拉起；MuMu 没开会先自动拉起）；
+2. 在模拟器里**人工登录一次**（南网 SSO，登录态保留在模拟器里，机器人不碰
+   密码）；登录后若停在「因私出行」入口，走因公首页的「酒店预订」即可（流程
+   自动处理出差申请弹层）；
 3. 查价时**保持 MuMu 开着**（最小化可以，全程无需人工操作）；
-4. 检测状态：`uv run --project gate xy-gate hotel-app-state`。
+4. 检测状态：`uv run --project gate xy-gate hotel-app-state`（或设置页按钮）。
 
 技术形态：纯 ADB + MuMu 官方外部渲染接口（MAA 同款，**零注入**——该 App 有
 加固壳，注入式自动化会触发自杀），截图 OCR 走像素层判定（Weex 页面栈在

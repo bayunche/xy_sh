@@ -142,6 +142,9 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--code", default="", help="商旅协议码（缺省按 --group 从配置库自动取）")
     sub.add_parser("hotel-browser", help="唤出查价浏览器窗口（登录同程/携程/集团会员用）")
     sub.add_parser("hotel-app-state", help="App 查价通道状态（模拟器 ADB/App 安装诊断）")
+    sp = sub.add_parser("hotel-setup", help="App 源一键安装：MuMu 模拟器 + 赫兹商旅 App")
+    sp.add_argument("--what", default="status", choices=["mumu", "app", "status"],
+                    help="mumu=装模拟器 app=装赫兹App status=看进度")
     sp = sub.add_parser("hotel-groups", help="酒店集团注册表（官网源决策表）；--hotel 按名匹配集团")
     sp.add_argument("--hotel", default="")
 
@@ -217,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
         }, base)
     elif args.cmd == "hotel-app-state":
         out = _request("GET", "/api/hotel/app-state", base=base)
+    elif args.cmd == "hotel-setup":
+        if args.what == "status":
+            out = _request("GET", "/api/hotel/setup-status", base=base)
+        else:
+            out = _request("POST", f"/api/hotel/install-{'mumu' if args.what == 'mumu' else 'app'}",
+                           {}, base)
     elif args.cmd == "hotel-groups":
         import urllib.parse
         qs = urllib.parse.urlencode({"hotel": args.hotel}) if getattr(args, "hotel", "") else ""
