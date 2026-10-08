@@ -89,6 +89,17 @@ function venvPython() {
   return fs.existsSync(p) ? p : null;
 }
 
+// venv 有效性自检：文件在≠能用（实测 mac 上 uv 失败落到 python 兜底、pip
+// 也没装成时，venv 存在但 xy_gate/依赖缺失，daemon 起来就 "No module named"）
+async function venvUsable(py, log) {
+  const r = await run(py, ["-c", "import xy_gate, aiohttp"], { cwd: APP_ROOT });
+  if (r.code !== 0) {
+    log(`[env] venv 自检失败: ${(r.out || "").trim().split(/\r?\n/).slice(-2).join(" ").slice(0, 180)}`);
+    return false;
+  }
+  return true;
+}
+
 // spawn 异步跑命令并收集输出（execSync 会卡死主进程，首启下载几分钟不可接受）
 function run(cmd, args, opts = {}) {
   return new Promise((resolve) => {
@@ -114,15 +125,24 @@ function findUv() {
   const r = require("child_process").spawnSync(
     IS_WIN ? "where" : "which", ["uv"], { encoding: "utf8" });
   if (r.status === 0 && r.stdout.trim()) return r.stdout.trim().split(/\r?\n/)[0];
-  for (const dir of [".local/bin", ".cargo/bin"]) {
-    const f = path.join(HOME_DIR, dir, IS_WIN ? "uv.exe" : "uv");
+  const cands = [path.join(HOME_DIR, ".local", "bin"), path.join(HOME_DIR, ".cargo", "bin")];
+  if (!IS_WIN) {
+    // mac 系统 python 的 pip --user 装到 ~/Library/Python/<ver>/bin
+    try {
+      const libPy = path.join(HOME_DIR, "Library", "Python");
+      if (fs.existsSync(libPy))
+        for (const v of fs.readdirSync(libPy)) cands.push(path.join(libPy, v, "bin"));
+    } catch {}
+  }
+  for (const dir of cands) {
+    const f = path.join(dir, IS_WIN ? "uv.exe" : "uv");
     if (fs.existsSync(f)) return f;
   }
   return null;
 }
 
 async function installUv(log) {
-  const attempts = [["国内镜像", CN_MIRRORS.uvBin], ["官方源", ""]];
+  const attempts = [["ghproxy 镜像", CN_MIRRORS.uvBin], ["官方源", ""]];
   for (const [name, dlUrl] of attempts) {
     log(`[env] 未找到 uv，自动安装（${name}）…`);
     let r;
@@ -142,13 +162,26 @@ async function installUv(log) {
     if (uv) return uv;
     log(`[env] uv 安装（${name}）失败: ${(r.out || "").trim().split(/\r?\n/).slice(-2).join(" ").slice(0, 160)}`);
   }
+  // 第三路：pip 国内源装 uv（本机有任何 python3+pip 即可；uv 是纯二进制 wheel）
+  const pyBin = IS_WIN ? "python" : "python3";
+  log("[env] 尝试 pip（阿里云源）安装 uv…");
+  const r = await run(pyBin,
+    ["-m", "pip", "install", "--user", "--upgrade", "uv", "-i", CN_MIRRORS.pypi],
+    { timeout: 300000 });
+  const uv = findUv();
+  if (uv) return uv;
+  log(`[env] pip 装 uv 失败: ${(r.out || "").trim().split(/\r?\n/).slice(-2).join(" ").slice(0, 160)}`);
   return null;
 }
 
 async function ensureVenv(log) {
-  const existing = venvPython();
-  if (existing) return existing;
   const gateDir = path.join(APP_ROOT, "gate");
+  const existing = venvPython();
+  if (existing && await venvUsable(existing, log)) return existing;
+  if (existing) {
+    log("[env] venv 残缺，删除重建…");
+    fs.rmSync(path.join(gateDir, ".venv"), { recursive: true, force: true });
+  }
   let uv = findUv() || await installUv(log);
   if (uv) {
     for (const [name, extra] of [
@@ -161,7 +194,7 @@ async function ensureVenv(log) {
       const tail = (r.out || "").trim().split(/\r?\n/).filter(Boolean).slice(-3).join(" | ");
       if (tail) log(`[env] ${tail.slice(0, 300)}`);
       const py = venvPython();
-      if (r.code === 0 && py) return py;
+      if (r.code === 0 && py && await venvUsable(py, log)) return py;
       log(`[env] uv sync（${name}）失败 code=${r.code}`);
     }
   }
@@ -173,8 +206,15 @@ async function ensureVenv(log) {
     : path.join(gateDir, ".venv", "bin", "pip");
   let r = await run(pip, ["install", ".", "-i", CN_MIRRORS.pypi],
     { cwd: gateDir, timeout: 15 * 60 * 1000 });
-  if (r.code !== 0) r = await run(pip, ["install", "."], { cwd: gateDir, timeout: 15 * 60 * 1000 });
-  return venvPython();
+  if (r.code !== 0) {
+    log(`[env] pip（国内源）失败: ${(r.out || "").trim().split(/\r?\n/).slice(-2).join(" ").slice(0, 180)}`);
+    r = await run(pip, ["install", "."], { cwd: gateDir, timeout: 15 * 60 * 1000 });
+  }
+  if (r.code !== 0) {
+    log(`[env] pip（官方源）失败: ${(r.out || "").trim().split(/\r?\n/).slice(-2).join(" ").slice(0, 180)}`);
+  }
+  const py = venvPython();
+  return (py && await venvUsable(py, log)) ? py : null;
 }
 
 // ── xy-gate sidecar ─────────────────────────────────────────────────
@@ -191,6 +231,9 @@ async function startDaemon(log) {
     XY_DSH_NODE: process.execPath,
     XY_DSH_SCRIPT: fs.existsSync(dshScript) ? dshScript : "",
     PYTHONIOENCODING: "utf-8",
+    // 双保险：即便某种 venv 状态导致项目没装进 site-packages（依赖在），
+    // PYTHONPATH 指到 gate 源码也能 import xy_gate
+    PYTHONPATH: path.join(APP_ROOT, "gate"),
   });
   fs.mkdirSync(path.join(APP_ROOT, "data"), { recursive: true });
   daemon = spawn(py, ["-m", "xy_gate", "serve"], { cwd: APP_ROOT, env, windowsHide: true });
