@@ -14,6 +14,7 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -24,6 +25,36 @@ HERTZ_MAIN = f"{HERTZ_PACKAGE}/com.ygsoft.tphone.MainActivity"
 MUMU_ADB = os.environ.get("XY_APP_ADB", "127.0.0.1:16384")   # MuMu 实例0；mac=MuMu Pro 默认同号段
 PRICE_RE = re.compile(r"[¥￥]\s*([0-9][0-9,]{2,})")
 LOGIN_HINTS = ("请输入手机号", "请输入密码", "请输入验证码", "账号密码登录", "登录")
+
+
+def ensure_adb_path() -> Optional[str]:
+    """确保 adbutils 能找到 adb 二进制（它只认 PATH/ANDROID_HOME，mac 轮子
+    不带 adb——实测报 "No adb exe could be found"）。
+
+    顺序：PATH → MuMu 自带（win=安装目录 shell/adb.exe；mac=MuMuPlayer.app
+    内递归找），把所在目录注入 PATH。MuMu 自带的 adb 与模拟器版本匹配，
+    官方推荐。返回 adb 路径，找不到 None。"""
+    import shutil
+    p = shutil.which("adb")
+    if p:
+        return p
+    cands: List[str] = []
+    if sys.platform == "win32":
+        cands.append(r"C:\Program Files\Netease\MuMu Player 12\shell\adb.exe")
+    elif sys.platform == "darwin":
+        app = Path("/Applications/MuMuPlayer.app")
+        if app.exists():
+            try:
+                hit = next(app.rglob("adb"))
+                cands.append(str(hit))
+            except StopIteration:
+                pass
+    for c in cands:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            os.environ["PATH"] = os.path.dirname(c) + os.pathsep + \
+                os.environ.get("PATH", "")
+            return c
+    return None
 
 
 def _norm(s: str) -> str:
@@ -141,6 +172,7 @@ class RpaClient:
     def dev(self):
         if self._dev is None:
             import adbutils
+            ensure_adb_path()   # mac 上 adbutils 不带 adb 二进制，注入 MuMu 自带的
             adbutils.adb.connect(self.adb_addr, timeout=8)
             self._dev = adbutils.adb.device(self.adb_addr)
         return self._dev
@@ -559,7 +591,9 @@ class HertzApp(RpaClient):
             out["error"] = str(e)[:160]
             if _sys.platform == "darwin":
                 out["hint"] = ("mac 需要：MuMu Player Pro（Apple Silicon，装「赫兹商旅」"
-                               "App 并人工登录一次）保持运行；连接地址可用环境变量 "
+                               "App 并人工登录一次）保持运行；adb 会自动用 MuMu 自带的"
+                               "（装了 MuMu 仍报 No adb exe 就 brew install --cask "
+                               "android-platform-tools）；连接地址可用环境变量 "
                                "XY_APP_ADB 覆盖（默认 127.0.0.1:16384）")
             else:
                 out["hint"] = "Windows 需要：MuMu 模拟器 12 保持运行（ADB 16384）"

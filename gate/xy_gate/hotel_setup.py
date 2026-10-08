@@ -138,6 +138,8 @@ def _mumu_adb_ready(adb_addr: str, timeout_s: float = 240) -> bool:
     """MuMu ADB 端口就绪前反复连接（没起就拉起一次；实测冷启动 Android
     就绪常超 90s，给足 4 分钟）。"""
     import adbutils
+    from .ota_app import ensure_adb_path
+    ensure_adb_path()
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
@@ -153,8 +155,9 @@ def _mumu_adb_ready(adb_addr: str, timeout_s: float = 240) -> bool:
 
 def _install_app() -> None:
     try:
-        from .ota_app import HertzApp
+        from .ota_app import HertzApp, ensure_adb_path
         import adbutils
+        ensure_adb_path()
         app = HertzApp()
         try:
             online = app.adb_addr in [d.serial for d in adbutils.adb.device_list()]
