@@ -272,17 +272,27 @@ def load_robot_config(config_dir: Optional[Path] = None) -> RobotConfig:
     return cfg
 
 
-def load_account(name: str, config_dir: Optional[Path] = None) -> Account:
+def load_account(name: str, config_dir: Optional[Path] = None,
+                 required: bool = True) -> Account:
+    """加载闲鱼账号 Cookie。
+
+    required=False（serve 路径）：首启未扫码是正常状态，返回空 Cookie 的
+    stub 走「未登录模式」（daemon 跳过 WS，设置页扫码后热切换），而不是
+    把 daemon 干崩——桌面版首启必经此态。"""
     config_dir = config_dir or (REPO_ROOT / "config")
     raw = _load_yaml(config_dir / "accounts.yaml")
     accounts = raw.get("accounts") or {}
     if name not in accounts:
+        if not required:
+            return Account(name=name, cookies="")
         raise KeyError(
             f"accounts.yaml 中没有账号 '{name}'（现有: {list(accounts) or '无'}）。"
             "请复制 config/accounts.example.yaml 为 accounts.yaml 并填入 Cookie。"
         )
     cookies = str(accounts[name].get("cookies") or "").strip()
     if "unb=" not in cookies:
+        if not required:
+            return Account(name=name, cookies="")
         raise ValueError(f"账号 '{name}' 的 Cookie 缺少 unb 字段（未登录态），请重新从浏览器复制整段 Cookie")
     return Account(name=name, cookies=cookies)
 

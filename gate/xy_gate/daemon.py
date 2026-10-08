@@ -62,6 +62,12 @@ class Daemon:
     # ── 生命周期 ──────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        if "unb=" not in (self.account.cookies or ""):
+            # 未登录模式（桌面版首启）：后台/设置页/扫码抓取照常，跳过需要
+            # 登录态的常驻任务；apply_new_cookies 扫码成功后会补启 WS
+            print("未登录模式：消息/查价等闲鱼功能不可用，请在设置页扫码登录"
+                  "（登录成功自动热切换，无需重启）", flush=True)
+            return
         self._ws_task = asyncio.create_task(self._ws_guard(), name="ws")
         if self.cfg.audit_daily_at:
             self._audit_task = asyncio.create_task(self._audit_loop(), name="audit")

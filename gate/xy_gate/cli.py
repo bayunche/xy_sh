@@ -157,7 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         from .server import serve
         import asyncio
         cfg = load_robot_config()
-        account = load_account(cfg.account)
+        # 未登录是合法状态（桌面版首启）：空账号 stub，设置页扫码后热切换
+        account = load_account(cfg.account, required=False)
         asyncio.run(serve(_daemon(cfg, account)))
         return 0
 
