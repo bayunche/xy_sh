@@ -377,7 +377,7 @@ export default function Settings() {
       <Section title="赫兹商旅 App（协议价真源）" desc="酒店代订第四源：模拟器里查南网协议价，命中时作为成本基准（优先于携程价）">
         <div className="rounded-lg border border-border bg-muted/40 p-3 space-y-1.5 text-xs text-mutedfg">
           <p className="font-medium text-fg">首次使用（一次装好，长期有效）：点下方按钮一键装 MuMu → 一键装 App → 在模拟器里<b>人工登录一次</b> → 查价时保持 MuMu 开着（最小化可以）。Mac 全自动安装；Windows 会打开官网下载页。</p>
-          <p>ADB 端口默认 16384（可用环境变量 XY_APP_ADB 覆盖）；每次查价约 1.5~2 分钟（含冷启动）；未配置不影响其他三个查价源。</p>
+          <p>ADB 地址自动发现（Win=16384，Mac 默认 5555；可用环境变量 XY_APP_ADB 覆盖）；每次查价约 1.5~2 分钟（含冷启动）；未配置不影响其他三个查价源。</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" variant="secondary" disabled={setup?.mumu?.state === "downloading" || setup?.mumu?.state === "installing" || setup?.mumu?.state === "resolving"}

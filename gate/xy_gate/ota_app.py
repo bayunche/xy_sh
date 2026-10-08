@@ -22,9 +22,44 @@ from typing import Any, Dict, List, Optional, Tuple
 
 HERTZ_PACKAGE = "com.ygsoft.mup.businesstravelnw"
 HERTZ_MAIN = f"{HERTZ_PACKAGE}/com.ygsoft.tphone.MainActivity"
-MUMU_ADB = os.environ.get("XY_APP_ADB", "127.0.0.1:16384")   # MuMu 实例0；mac=MuMu Pro 默认同号段
 PRICE_RE = re.compile(r"[¥￥]\s*([0-9][0-9,]{2,})")
 LOGIN_HINTS = ("请输入手机号", "请输入密码", "请输入验证码", "账号密码登录", "登录")
+
+
+def discover_adb_addr() -> str:
+    """自动发现 MuMu 的 ADB 地址（用户实测 mac 装 MuMu 后仍"未运行"——默认
+    端口不是 16384 而是 5555，官方 mac 文档：开发者设置默认勾选"使用 ADB
+    默认端口(5555)"；16384 只是 Windows 固定规则 16384+32×index 与文档
+    customAdbPort 示例）。
+
+    策略：XY_APP_ADB 环境变量 → win=16384 → mac 依次探测 5555/16384 →
+    mumutool info 挖自定义 adb 端口 → 兜底 5555。"""
+    import socket
+    if os.environ.get("XY_APP_ADB"):
+        return os.environ["XY_APP_ADB"]
+    if sys.platform == "win32":
+        return "127.0.0.1:16384"
+    for port in (5555, 16384):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1.5):
+                return f"127.0.0.1:{port}"
+        except OSError:
+            pass
+    # mumutool（MuMu mac 命令行）info 里挖 adb 端口（自定义端口场景）
+    import subprocess
+    for cand in ("/Applications/MuMuPlayer.app/Contents/MacOS/mumutool",
+                 "/Applications/MuMuPlayer.app/Contents/MacOS/mumu-tool"):
+        if os.path.isfile(cand):
+            try:
+                out = subprocess.run([cand, "info", "0"], capture_output=True,
+                                     text=True, timeout=15).stdout
+                m = re.search(r'"(?:adb[_a-zA-Z]*port|\w*adbport\w*)"\s*:\s*(\d{4,5})',
+                              out, re.I) or re.search(r'"(\w*port\w*)"\s*:\s*(\d{4,5})', out)
+                if m:
+                    return f"127.0.0.1:{m.group(m.lastindex)}"
+            except Exception:  # noqa: BLE001
+                pass
+    return "127.0.0.1:5555"
 
 
 def ensure_adb_path() -> Optional[str]:
@@ -152,8 +187,8 @@ class RpaClient:
     _vision_ocr_cached = None      # macOS Vision OCR（懒加载；None=未试，False=不可用）
     """纯 ADB RPA 基元：dump / tap / text / screen / launch。"""
 
-    def __init__(self, adb_addr: str = MUMU_ADB, shots_dir: str = "../data/emulator"):
-        self.adb_addr = adb_addr
+    def __init__(self, adb_addr: str = None, shots_dir: str = "../data/emulator"):
+        self.adb_addr = adb_addr or discover_adb_addr()
         self._dev = None
         self._nemu = None
         self.shots_dir = Path(shots_dir)
@@ -591,10 +626,8 @@ class HertzApp(RpaClient):
             out["error"] = str(e)[:160]
             if _sys.platform == "darwin":
                 out["hint"] = ("mac 需要：MuMu Player Pro（Apple Silicon，装「赫兹商旅」"
-                               "App 并人工登录一次）保持运行；adb 会自动用 MuMu 自带的"
-                               "（装了 MuMu 仍报 No adb exe 就 brew install --cask "
-                               "android-platform-tools）；连接地址可用环境变量 "
-                               "XY_APP_ADB 覆盖（默认 127.0.0.1:16384）")
+                               "App 并人工登录一次）保持运行；adb 自动用 MuMu 自带的、"
+                               "端口自动探测（默认 5555，也可用环境变量 XY_APP_ADB 指定）")
             else:
                 out["hint"] = "Windows 需要：MuMu 模拟器 12 保持运行（ADB 16384）"
         return out

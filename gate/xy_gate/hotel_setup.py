@@ -134,13 +134,14 @@ def _start_mumu_once() -> None:
         pass
 
 
-def _mumu_adb_ready(adb_addr: str, timeout_s: float = 240) -> bool:
+def _mumu_adb_ready(adb_addr: str, timeout_s: float = 240, what: str = "app") -> bool:
     """MuMu ADB 端口就绪前反复连接（没起就拉起一次；实测冷启动 Android
-    就绪常超 90s，给足 4 分钟）。"""
+    就绪常超 90s，给足 4 分钟）。进度刷新到 STATUS，UI 不再看起来卡死。"""
     import adbutils
     from .ota_app import ensure_adb_path
     ensure_adb_path()
-    deadline = time.time() + timeout_s
+    t0 = time.time()
+    deadline = t0 + timeout_s
     while time.time() < deadline:
         try:
             adbutils.adb.connect(adb_addr, timeout=5)
@@ -149,6 +150,9 @@ def _mumu_adb_ready(adb_addr: str, timeout_s: float = 240) -> bool:
         except Exception:  # noqa: BLE001
             pass
         _start_mumu_once()
+        left = int(deadline - time.time())
+        _set(what, state="resolving",
+             progress=f"等待 MuMu ADB（{adb_addr}）就绪… 剩余 {left}s（冷启动慢属正常）")
         time.sleep(5)
     return False
 
