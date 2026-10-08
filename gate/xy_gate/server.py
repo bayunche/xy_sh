@@ -313,8 +313,10 @@ def build_app(daemon: Daemon) -> web.Application:
         key = str(body.get("api_key") or "").strip()
         base_url = str(body.get("base_url") or "").strip()
         model = str(body.get("model") or "").strip()
-        if key and len(key) < 16:
-            return _json({"error": "API Key 长度异常"}, 400)
+        # OpenAI 兼容供应商 key 长度不一（DeepSeek 35 位、中转/本地端点更短甚至
+        # "sk-xx" 占位），只拦明显误粘贴，不设 16 位下限
+        if key and len(key) < 3:
+            return _json({"error": "API Key 太短（疑似没粘贴完整）"}, 400)
         if not (key or base_url or model):
             return _json({"error": "至少提供 api_key / base_url / model 之一"}, 400)
         return _json(daemon.save_dsh_model(api_key=key, base_url=base_url, model=model))
