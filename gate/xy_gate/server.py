@@ -569,10 +569,24 @@ async def serve(daemon: Daemon) -> None:
     await daemon.start()
     runner = web.AppRunner(build_app(daemon))
     await runner.setup()
-    site = web.TCPSite(runner, daemon.cfg.listen_host, daemon.cfg.listen_port)
-    await site.start()
+    # 端口被占（旧版本应用的残留 daemon 没死干净）→ 等待重试而非直接崩
+    site = None
+    for attempt in range(6):
+        try:
+            site = web.TCPSite(runner, daemon.cfg.listen_host, daemon.cfg.listen_port)
+            await site.start()
+            break
+        except OSError as e:
+            if e.errno not in (48, 98, 10048):   # EADDRINUSE: mac/linux/win
+                raise
+            print(f"端口 {daemon.cfg.listen_port} 被占用（疑似旧进程残留），"
+                  f"等待重试 {attempt + 1}/6…", flush=True)
+            await asyncio.sleep(10)
+    if site is None:
+        raise OSError(f"端口 {daemon.cfg.listen_port} 持续被占用：请在活动监视器/"
+                      "任务管理器结束旧的 python(xy_gate) 进程后重开应用")
     print(f"xy-gate 已启动: http://{daemon.cfg.listen_host}:{daemon.cfg.listen_port}"
-          f"（mode={daemon.cfg.mode}, account={daemon.account.name}）")
+          f"（mode={daemon.cfg.mode}, account={daemon.account.name}）", flush=True)
     try:
         await asyncio.Event().wait()   # 常驻
     finally:

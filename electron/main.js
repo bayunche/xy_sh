@@ -237,8 +237,8 @@ async function startDaemon(log) {
   });
   fs.mkdirSync(path.join(APP_ROOT, "data"), { recursive: true });
   daemon = spawn(py, ["-m", "xy_gate", "serve"], { cwd: APP_ROOT, env, windowsHide: true });
-  daemon.stdout.on("data", (d) => log(String(d).trim()));
-  daemon.stderr.on("data", (d) => log(String(d).trim()));
+  daemon.stdout.on("data", (d) => String(d).split(/\r?\n/).forEach((l) => l.trim() && log(l)));
+  daemon.stderr.on("data", (d) => String(d).split(/\r?\n/).forEach((l) => l.trim() && log(l)));
   daemon.on("exit", (code) => {
     daemon = null;
     if (!quitting) log(`[gate] 退出 code=${code}`);
@@ -287,10 +287,10 @@ if (!gotLock) {
     const logFile = path.join(app.getPath("userData"), "startup.log");
     const log = (line) => {
       if (!line) return;
-      logs.push(line.slice(0, 300));
-      try { fs.appendFileSync(logFile, new Date().toLocaleTimeString() + " " + line.slice(0, 500) + "\n"); } catch {}
+      logs.push(line.slice(0, 1200));
+      try { fs.appendFileSync(logFile, new Date().toLocaleTimeString() + " " + line.slice(0, 4000) + "\n"); } catch {}
       win && win.webContents.executeJavaScript(
-        `window.__xylog && window.__xylog(${JSON.stringify(logs.slice(-12))})`, true).catch(() => {});
+        `window.__xylog && window.__xylog(${JSON.stringify(logs.slice(-16))})`, true).catch(() => {});
     };
 
     await win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(bootPage()));
