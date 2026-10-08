@@ -27,8 +27,9 @@ function syncAppRoot() {
   if (!app.isPackaged) return;
   const dirs = [["gate", true], ["web", true], ["prompts", true], ["sop", true], [".dsh", true], ["config", false]];
   const marker = path.join(APP_ROOT, ".version");
-  const ver = app.getVersion();
-  if (fs.existsSync(marker) && fs.readFileSync(marker, "utf8") === ver) return;
+  // **代码目录每次启动都刷新**——老版本用 .version 短路，同版本号升级时
+  // userData 里永远跑旧代码（实测 mac 0.1.0→0.1.0 直接踩中：新包已含修复
+  // 但旧 cli.py 继续崩）。.venv 在 copyTree 排除项里不受影响，配置仍只补缺。
   fs.mkdirSync(APP_ROOT, { recursive: true });
   for (const [dir, overwrite] of dirs) {
     const src = path.join(RES, dir);
@@ -50,7 +51,7 @@ function syncAppRoot() {
     }
   }
   fs.mkdirSync(path.join(APP_ROOT, "data"), { recursive: true });
-  fs.writeFileSync(marker, ver);
+  fs.writeFileSync(marker, app.getVersion());   // 仅作记录参考（同步不再依赖它）
 }
 
 const COPY_SKIP = new Set([".venv", "node_modules", ".pytest_tmp", "__pycache__"]);
