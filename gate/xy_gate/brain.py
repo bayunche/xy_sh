@@ -184,4 +184,11 @@ class Brain:
 def summarize_result(result: BrainResult) -> str:
     """取 stdout 末尾若干行作为事件台账里的大脑输出摘要。"""
     lines = [l for l in result.stdout.splitlines() if l.strip()]
-    return "\n".join(lines[-15:]) if lines else (result.stderr[-500:] or "(无输出)")
+    if lines:
+        return "\n".join(lines[-15:])
+    if result.ok:
+        # 静默成功（实测复现：思考型/兼容端点 content 为空、内容只在
+        # reasoning 通道，dsh 拿不到正文就 exit 0 无输出）
+        return ("(大脑空输出：模型疑似思考型，响应无 content——"
+                "换非思考模型或让供应商输出 content)")
+    return result.stderr[-500:] or "(无输出)"

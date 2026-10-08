@@ -203,8 +203,18 @@ class Daemon:
                 "ACCOUNT": self.account.name,
             })
             result = await self.brain.run_job(job, timeout=max(120, self.cfg.brain.job_timeout_sec))
-            reply = result.stdout.strip() or f"（dsh 无输出，exit={result.exit_code}）\n{result.stderr[-300:]}"
-            ok = result.ok
+            if result.stdout.strip():
+                reply, ok = result.stdout.strip(), result.ok
+            elif result.ok:
+                # 静默成功（实测复现：思考型/兼容端点 content 为空、内容只在
+                # reasoning 通道，dsh 拿不到正文就 exit 0 无输出）
+                reply, ok = ("（大脑空输出：模型疑似思考型——响应里没有 content，"
+                             "内容可能只在 reasoning 通道。请在设置页换非思考模型，"
+                             "或让供应商端点输出 content 字段）"), False
+                if result.stderr.strip():
+                    reply += f"\n{result.stderr[-300:]}"
+            else:
+                reply, ok = f"（dsh 无输出，exit={result.exit_code}）\n{result.stderr[-300:]}", False
         except FileNotFoundError as e:
             reply, ok = f"job 模板缺失: {e}", False
         history.append({"role": "assistant", "text": reply[:4000], "ts": int(time.time())})
